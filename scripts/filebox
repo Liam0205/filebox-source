@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# filebox 的命令行客户端。
+#
+#   export FILEBOX_TOKEN=fb_xxxx        # 在 /admin 里生成
+#   export FILEBOX_URL=https://…        # 从站点 /filebox 下载的脚本已带默认值
+#   export FILEBOX_QUIET=1              # 可选，关掉 put/get 在终端里的进度条
+#
+#   filebox put ./photo.jpg                  # 上传到根目录，成功后打印下载地址
+#   filebox put ./photo.jpg album/2026.jpg   # 上传到指定路径（同名默认拒绝）
+#   filebox put -f ./photo.jpg album/2026.jpg  # 覆盖同名文件
+#   filebox ls
+#   filebox get album/2026.jpg [保存为]
+#   filebox url album/2026.jpg
+#   filebox mkdir album/2026
+#   filebox rm album/2026.jpg
+#   filebox rmdir album/2026                 # 只删空目录
+#   filebox keep album/2026.jpg              # 设为长期，不参与自动清理
+#   filebox unkeep album/2026.jpg            # 取消长期
+#
+# 这是临时存储：超过个人文件数上限、或者全站文件太多时，
+# 最旧的非长期文件会被自动删除。ls 第一行显示用量。
+#
+# 只依赖 bash、curl、od，有 file 命令时用它判断文件类型。
+#
+# 兼容性要求：要能在 macOS 自带的 Bash 3.2、BSD 工具和旧版 curl 上跑。
+# 所以不用关联数组、mapfile、${var,,}、curl 的 --fail-with-body，
+# 也不依赖 python3 或 jq：需要解析的响应都让服务端用 ?format=text 返回纯文本。
+set -euo pipefail
+
+# Worker 下发脚本时会把这一行替换成站点地址；仓库里的副本保持为空。
+DEFAULT_URL=""
+
+BASE="${FILEBOX_URL:-$DEFAULT_URL}"
+if [ -z "$BASE" ]; then
+  echo "需要设置 FILEBOX_URL，例如 https://filebox.example.com" >&2
+  exit 1
+fi
+BASE="${BASE%/}"
+TOKEN="${FILEBOX_TOKEN:-}"
+if [ -z "$TOKEN" ]; then
+  echo "需要设置 FILEBOX_TOKEN（在 $BASE/admin 里生成）" >&2
+  exit 1
+fi
+NL='
+'
+
+# 传输较大的 put 和 get 在 stderr 连着终端时显示 curl 的进度条（-#），
+# stderr 被重定向时保持安静。
+QUIET=-s
+PROGRESS=-s
+if [ -t 2 ] && [ -z "${FILEBOX_QUIET:-}" ]; then PROGRESS=-#; fi
+
+# 调接口。成功时把响应体写到 stdout；HTTP 状态不是 2xx 时把响应体写到 stderr，返回 1。
+# 最近一次的 HTTP 状态码留在 API_CODE 里（网络错误时为空）。
+API_CODE=""
+api() {
+  local out code
+  API_CODE=""
+  if ! out=$(curl "$QUIET" -S --max-time 0 -w "$NL%{http_code}" -H "Authorization: Bearer $TOKEN" "$@"); then
+    return 1
+  fi
+  code=${out##*"$NL"}
+  out=${out%"$NL"*}
+  out=${out%"$NL"}
+  API_CODE=$code
+  case "$code" in
+    2[0-9][0-9])
+      printf '%s\n' "$out"
+      ;;
+    *)
+      printf '%s\n' "$out" >&2
+      return 1
+      ;;
+  esac
+}
+
+# 百分号编码。每个字节都编码成 %xx，服务端照样能解开；
+# 用 od 拿字节，避开 Bash 3.2 按 locale 切字符的问题。
+q() {
+  # shellcheck disable=SC2046
+  printf '%%%s' $(printf '%s' "$1" | od -An -tx1 -v)
+}
+
+mime() {
+  local t=""
+  if command -v file >/dev/null 2>&1; then
+    t=$(file --brief --mime-type "$1" 2>/dev/null || true)
+  fi
+  case "$t" in
+    */*) printf '%s\n' "$t" ;;
+    *) printf '%s\n' "application/octet-stream" ;;
+  esac
+}
+
+need() {
+  if [ -z "${1:-}" ]; then
+    echo "用法: filebox $2" >&2
+    exit 1
+  fi
+}
+
+cmd="${1:-}"
+if [ "$#" -gt 0 ]; then shift; fi
+
+case "$cmd" in
+  put)
+    overwrite=""
+    if [ "${1:-}" = "-f" ]; then overwrite="&overwrite=1"; shift; fi
+    need "${1:-}" "put [-f] <本地文件> [远端路径]"
+    src="$1"
+    if [ ! -f "$src" ]; then
+      echo "不是普通文件：$src" >&2
+      exit 1
+    fi
+    dest="${2:-$(basename "$src")}"
+    # -T 边读边传，不像 --data-binary 那样先把整个文件读进内存；方法是 PUT。
+    # 清掉 Expect 头，省掉一次 100-continue 往返。
+    QUIET=$PROGRESS
+    target="$BASE/api/upload?format=text&path=$(q "$dest")$overwrite"
+    type=$(mime "$src")
+    if ! api -T "$src" -H "Expect:" -H "Content-Type: $type" "$target"; then
+      # 507：release 满了，服务端已经清理了一批旧文件，重传一次。
+      if [ "$API_CODE" != "507" ]; then exit 1; fi
+      echo "重新上传一次…" >&2
+      api -T "$src" -H "Expect:" -H "Content-Type: $type" "$target"
+    fi
+    ;;
+
+  ls)
+    api "$BASE/api/files?format=text"
+    ;;
+
+  url)
+    need "${1:-}" "url <远端路径>"
+    api "$BASE/api/url?format=text&path=$(q "$1")"
+    ;;
+
+  mkdir)
+    need "${1:-}" "mkdir <目录路径>"
+    api -X POST "$BASE/api/folder?path=$(q "$1")" >/dev/null
+    echo "已创建目录 $1"
+    ;;
+
+  rm)
+    need "${1:-}" "rm <远端路径>"
+    api -X DELETE "$BASE/api/file?path=$(q "$1")" >/dev/null
+    echo "已删除 $1"
+    ;;
+
+  rmdir)
+    need "${1:-}" "rmdir <目录路径>"
+    api -X DELETE "$BASE/api/folder?path=$(q "$1")" >/dev/null
+    echo "已删除目录 $1"
+    ;;
+
+  keep)
+    need "${1:-}" "keep <远端路径>"
+    api -X POST "$BASE/api/keep?format=text&path=$(q "$1")"
+    ;;
+
+  unkeep)
+    need "${1:-}" "unkeep <远端路径>"
+    api -X DELETE "$BASE/api/keep?format=text&path=$(q "$1")"
+    ;;
+
+  get)
+    need "${1:-}" "get <远端路径> [保存为]"
+    out="${2:-$(basename "$1")}"
+    if [ -e "$out" ]; then
+      echo "目标已存在：$out（先移走或指定别的文件名）" >&2
+      exit 1
+    fi
+    link=$(api "$BASE/api/url?format=text&path=$(q "$1")")
+    curl "$PROGRESS" -S --fail --max-time 0 -o "$out" "$link"
+    echo "已保存到 $out"
+    ;;
+
+  *)
+    sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+    exit 1
+    ;;
+esac

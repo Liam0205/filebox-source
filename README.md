@@ -1,0 +1,214 @@
+# filebox
+
+以 GitHub Releases 为后端、Cloudflare Worker 为前端的文件箱：账号登录后可以上传、建目录、管理文件，生成 API token 给脚本用；下载不需要任何校验。
+
+## 它是怎么工作的
+
+```
+浏览器 ─┐
+        ├─ Cloudflare Worker ── KV（用户、token、文件索引）
+脚本 ───┘                      └─ GitHub 私有仓库的 release 资产（文件字节）
+```
+
+- **字节**存在一个私有仓库的 release 里，每个文件对应一个资产。
+- **路径与归属**存在 Workers KV：`user:<名>`、`token:<摘要>`、`file:<用户>:<路径>`、`dir:<用户>:<路径>`。
+- **下载**走 Worker 代理，不 302 到 GitHub：私有资产的下载地址是约一小时过期的签名 URL，域名在部分网络下也不稳定。
+
+分层的直接原因：GitHub 会改写资产名里的斜杠、中文和空格（`dir/a.txt` 变成 `dir.a.txt`），所以路径不能放在资产名上。资产名用不透明 id（`fb_<用户>_<随机>`），可读路径放在资产的 `label` 字段和 KV 索引里——`label` 原样保留中文和 `/`，需要时可以据此重建索引。
+
+## 功能
+
+- `/admin` 管理页：账号口令登录、文件管理与上传、token 生成/吊销、用户管理（仅管理员）。
+- 文件管理：任意深的虚拟目录、拖拽上传、下载、复制链接、删除文件、新建/删除空目录。
+- 每个用户只能看到和操作自己名下的文件；管理员可以代管。
+- 下载公开、无需登录。上传需要账号会话或 `Authorization: Bearer <token>`。
+- 命令行：`filebox`，一个 Bash 脚本，站点在 `/filebox` 下发。
+- 临时存储，会自动清理：每个用户最多 300 个文件，全站超过 950 个时删到 900 个，先删最旧的。想保留的文件可以设为长期，每人最多 20 个，全站最多 200 个。见下面的「自动清理」。
+
+## 免费额度的真实边界
+
+这些数字是设计的硬约束，不是保守估计。
+
+| 资源 | 免费额度 | 对应到本项目的含义 |
+| --- | --- | --- |
+| Worker 请求 | 100,000 次/天 | 下载、页面、API 合计 |
+| Worker 入口请求体 | 100 MB | 单文件上限默认 95 MiB，可在 `MAX_FILE_BYTES` 调整 |
+| KV 读 | 100,000 次/天 | 每次下载 1 次读；列文件读 metadata，不逐条读 |
+| KV 写 | 1,000 次/天 | 每次上传约 1 次 |
+| KV 删 | 1,000 次/天 | 每次删除约 1 次 |
+| KV list | 1,000 次/天 | 每次列目录 2 次；`/api/files` 每次调用都会 list；定时清理每小时 1 次 |
+| KV 存储 | 1 GB | 索引很小，主要限制在 GitHub 侧 |
+| GitHub release 资产数 | 1,000 个 | 所有用户合计共用一个 release，自动清理把它控制在 950 以内 |
+| GitHub 单资产 | < 2 GiB | 实际受 Worker 100 MB 入口限制 |
+
+**超额不会扣费**：免费计划下超出额度时对应操作直接报错。这也是这个方案不用 R2 的原因——R2 超量会计费。
+
+由此推出的使用画像：几百个文件、每天几百次列目录、上千次下载，完全够用；把它当大流量图床或几百 GB 网盘会先撞上 KV list 和 GitHub 资产数上限。
+
+## 自动清理
+
+filebox 是临时存储。release 最多放 1000 个资产，所以 Worker 每小时跑一次定时任务（`src/evict.js`），按下面的顺序删文件：
+
+1. 长期文件永远不删。
+2. 某个用户的文件超过 300 个（长期文件也算在内），先删他自己最旧的文件，删到 300 个。一个人批量上传，挤掉的是他自己的旧文件。
+3. 全站文件数还超过 950 个，再删全站最旧的文件，删到 900 个。
+
+每次最多删 40 个，剩下的留给下一个小时。免费计划每次调用最多发 50 个外部子请求，删一个文件要调一次 GitHub。两次定时任务之间如果 release 被传满，上传会返回 507：服务端当场清理一批，命令行和网页会自动重传一次。
+
+设为长期：网页文件列表里的「设为长期」，或者 `filebox keep <路径>`。每个用户最多 20 个，全站最多 200 个。长期文件一直占着名额，所以有上限。所有数值都在 `wrangler.jsonc` 的 `vars` 里。
+
+被清理的文件没有任何通知，链接直接 404。
+
+如果真的需要更大的容量：新建一个 release，把 `RELEASE_TAG` 改成它的 tag 重新部署。旧文件不受影响，下载和删除都按资产 id 走仓库级接口，与 release 无关；但自动清理按 KV 里的全部文件计数，阈值要一起调。
+
+## 部署
+
+```bash
+cp wrangler.example.jsonc wrangler.jsonc           # 填域名、KV id、存储仓库和 release tag
+npx wrangler kv namespace create filebox-users     # 已有就跳过，把 id 填进 wrangler.jsonc
+npx wrangler secret put GITHUB_TOKEN               # 私有仓库，Releases 读写权限
+npx wrangler secret put SESSION_SECRET             # 随机长串，例如 openssl rand -hex 32
+FILEBOX_PASSWORD='…' node scripts/setup.mjs alice --role admin --remote
+npx wrangler deploy
+```
+
+`wrangler.jsonc` 被 `.gitignore` 排除，域名、KV 命名空间 id、存储仓库名都只留在本地。
+
+存储侧需要一个私有仓库，和仓库里一个承载资产的 release，仓库名和 tag 填在 `wrangler.jsonc` 的 `GITHUB_REPO`、`RELEASE_TAG`，两项都没有默认值。不要用公开仓库存文件：公开仓库的 release 谁都能列出和下载，文件列表就公开了。release 要手工建：
+
+```bash
+gh release create <tag> -R <存储仓库> --title storage --notes "filebox 存储"   # 仓库不能为空
+```
+
+Worker 用 zone 路由接管一个主机名：DNS 里给这个主机名加一条开了代理的占位 A 记录（比如 `192.0.2.1`），`routes` 写 `<主机名>/*`。workers.dev 和预览地址都要关掉，原因写在 `wrangler.example.jsonc` 的注释里。挂在现有子域的路径下则同时改 `routes` 和 `BASE_PATH`。
+
+登录接口的限流要在 zone 上另配一条速率限制规则，仓库里没有它的配置。
+
+`setup.mjs` 是唯一的建号入口，没有开放注册，也没有「第一个登录的人自动成为管理员」这类引导逻辑。口令只从 `FILEBOX_PASSWORD` 或 stdin 读，不写进 shell 历史。
+
+## 本地开发
+
+```bash
+cp .dev.vars.example .dev.vars     # 填 GITHUB_TOKEN 和 SESSION_SECRET；ENFORCE_HTTPS 保持 false
+FILEBOX_PASSWORD='…' node scripts/setup.mjs admin --role admin
+npx wrangler dev --local-upstream 127.0.0.1:8787
+```
+
+本地 KV 落在 `.wrangler/state`，与线上互不影响（`--remote` 才写线上）。不加 `--local-upstream` 的话，wrangler 会把请求地址改写成路由里的主机名，接口返回的下载地址和 `/filebox` 脚本里的默认地址都会指向线上。
+
+## 命令行
+
+客户端是 `scripts/filebox`，Worker 在 `/filebox` 下发同一份脚本，并把脚本里的默认站点地址填成当前站点：
+
+```bash
+curl -fsSL https://<站点>/filebox -o filebox && chmod +x filebox   # 放进 PATH 里的任意目录
+export FILEBOX_TOKEN=fb_…          # 在 /admin 里生成，只显示一次
+
+filebox put ./photo.jpg album/2026.jpg   # 成功后打印下载地址；同名默认拒绝，-f 覆盖
+filebox ls
+filebox url album/2026.jpg               # 打印可直接分享的下载地址
+filebox get album/2026.jpg ./out.jpg     # 本地已有同名文件时拒绝
+filebox mkdir album/2027
+filebox rm album/2026.jpg
+filebox rmdir album/2027                 # 只删空目录
+filebox keep album/2026.jpg              # 设为长期，不参与自动清理；unkeep 取消
+```
+
+`ls` 的第一行是用量，例如 `alice：12/300 个文件，长期 3/20 个`；长期文件在列表里标着 `keep`。
+
+用仓库里的 `scripts/filebox` 时，要另外设置 `FILEBOX_URL`。
+
+`put` 和 `get` 在终端里会显示 curl 的进度条。stderr 被重定向时不显示；设置 `FILEBOX_QUIET=1` 也可以关掉。上传的进度条走到 100% 只说明文件到了 Cloudflare，之后还要等 Worker 把它写进 GitHub，写完才打印下载地址。网页端上传同样有进度条，到 100% 后会提示「正在写入 GitHub」；下载交给浏览器自己的下载进度。
+
+脚本要在 macOS 自带的 Bash 3.2 上运行，只依赖 curl 和 od，有 `file` 命令时用它判断文件类型，没有就按 `application/octet-stream` 上传。它不用 python3 或 jq；`ls`、`url`、`put` 需要的结果由服务端通过 `?format=text` 直接返回纯文本。2026-11-15 用 Bash 3.2.57（与 macOS 自带的版本相同）跑过全部命令。
+
+## HTTP 接口
+
+管理页内部的接口（会话 cookie）：
+
+```
+POST   /admin/api/login          {username, password}
+POST   /admin/api/logout
+GET    /admin/api/me
+GET    /admin/api/users          POST /admin/api/users
+POST   /admin/api/users/:name/password|disable|enable
+DELETE /admin/api/users/:name
+GET    /admin/api/tokens         POST /admin/api/tokens {label}
+DELETE /admin/api/tokens/:key
+```
+
+文件接口（会话 cookie 或 `Authorization: Bearer`）：
+
+```
+GET    /api/me
+GET    /api/files[?user=][&format=text]   管理员可加 ?user=
+GET    /api/url?path=…[&format=text]      取可直接下载的地址
+POST   /api/upload?path=…[&overwrite=1][&format=text]
+                                         PUT 也行。请求体就是文件字节，必须带 Content-Length
+DELETE /api/file?path=…
+POST   /api/folder                       {"path": "a/b"}，或者把 path 放在查询串里
+DELETE /api/folder?path=…                只删空目录
+POST   /api/keep?path=…[&format=text]    设为长期；超过上限返回 409
+DELETE /api/keep?path=…[&format=text]    取消长期
+```
+
+`/api/files` 的 JSON 里有 `limits`（`files`、`maxFiles`、`keep`、`maxKeep`），每个文件有 `keep` 字段。上传在 release 满了时返回 507，响应里的 `evicted` 是当场清理掉的文件数，大于 0 时重传即可。
+
+加 `format=text` 时，`files` 返回逐行的文件列表，`url` 和 `upload` 只返回一行完整的下载地址。
+
+公开下载：`GET|HEAD /f/<用户>/<路径>`，支持 Range。`?v=` 后面是 GitHub 资产 id，每次上传都会换一个新的。`v` 和当前版本一致时，内容不会再变，响应缓存一年（`immutable`）；不带 `v` 或 `v` 是旧版本时，返回当前内容，缓存 7 天。
+
+命令行脚本：`GET|HEAD /filebox`，不需要登录。
+
+## 安全设计
+
+- 口令用 PBKDF2-SHA256，迭代次数可配（`PASSWORD_ITERATIONS`，默认 100000），盐随机 16 字节。2026-11-14 在线上实测，登录耗时约 0.8–0.9 秒，没有触发免费计划的 CPU 限制。
+- `/admin/api/login` 由 zone 上的速率限制规则保护，阈值在 Cloudflare 面板里配，不在仓库里。
+- 只走 HTTPS：http 的 GET/HEAD 跳转到 https，http 的写请求直接返回 403；https 响应带 HSTS 头（一年，只作用于这个主机名）。
+- `/filebox` 往脚本里填站点地址前，先用正则校验，只接受 `https?://主机名[:端口][/路径]`，不合格就不填。`new URL()` 会接受像 `x.com$(id)` 这样的主机名，不校验就等于让请求头往用户要执行的脚本里注入命令。
+- 会话是无状态 HMAC 签名 cookie：`HttpOnly; Secure; SameSite=Strict`，7 天。每次请求都回查 KV，所以停用账号、改角色、删账号立刻生效（在 KV 一致性窗口内）。
+- 改口令会让该账号的所有会话失效（账号记录里的 `ver` 自增），同时吊销它的所有 token。
+- 删除账号会同时删除其名下全部文件（GitHub 资产和索引）与 token。
+- token 是 192 位随机数，KV 里只存 SHA-256 摘要，明文只在创建时返回一次。
+- 浏览器的写操作校验同源 `Origin`；口令只接受 JSON 请求体。
+- 路径逐段校验，拒绝 `..`、空段、控制字符和反斜杠；下载路由里解码后仍含 `/` 的段直接拒绝。
+- 上传的主动内容（HTML/SVG/JS/XML）一律 `Content-Disposition: attachment` 加 `nosniff`，并带 `CSP: default-src 'none'; sandbox`；只有图片、音视频、纯文本、PDF 内联展示。管理页另有自己的 CSP 和 `frame-ancestors 'none'`。
+- 跟随 GitHub 的签名跳转时手工剥离 `Authorization`，凭据不会发到 `release-assets.githubusercontent.com`。
+
+## 已知限制
+
+- **登录限流只按 IP 计数**。免费计划的速率限制规则只能按 IP 计数，换着 IP 爆破拦不住，所以口令要够长。Worker 自己不记失败次数：每次失败都写 KV 的话，猜不中口令的爆破也能把每天 1,000 次的免费写额度耗光，当天就没法上传。
+- **退出登录不吊销已签发的 cookie**：会话是无状态的，被窃取的 cookie 在 7 天内仍然有效。要立即作废某账号的所有会话，改一次口令。
+- **删除不是立即全网生效**：Worker 每次都先查 KV，删除后新的请求立即 404；但已经缓存过的浏览器会继续用旧内容，不带版本号的地址最长 7 天，带 `?v=` 的地址最长一年。
+- 上传要求 `Content-Length`，不能用 chunked 请求体（GitHub 的资产上传接口本身也要求长度）。
+- 单文件受 Worker 入口 100 MB 限制，不是 GitHub 的 2 GiB。更大文件目前没有通道。
+- 索引是 KV 上的扁平键，用户多、文件多时列目录会变慢并消耗 KV list 配额；这个设计的目标是几百到几千个文件。
+- **个人文件数上限是软的**：每小时才检查一次，两次检查之间一个用户可以暂时超过 300 个。
+- **长期文件的计数不是强一致的**：两个请求同时设置长期，可能略超上限（KV 最终一致）。
+- **release 满了时的兜底靠猜**：GitHub 没有文档说明 release 满了返回什么，代码把上传返回的 422 当作「满了」。正常情况下定时任务会把数量控制在 950 以内，碰不到这条路径。
+- **孤儿资产不计入**：清理按 KV 索引计数。上传成功但写索引失败留下的资产，不会被计数，也不会被清理。
+- 资产名里的用户部分没有做转义隐藏：知道 URL 的人能看到 `fb_<用户>_` 前缀，这不算敏感信息（下载本来就是公开的）。
+
+## 目录
+
+```
+src/
+  worker.js    路由与首页
+  admin.js     管理页（单页应用）与账号/token 接口
+  files.js     文件管理 API
+  download.js  公开下载、Range、缓存
+  access.js    身份解析（token / 会话）、同源校验
+  auth.js      口令哈希、会话签名、token 生成
+  users.js     KV：用户、token
+  store.js     KV：文件与目录索引（文件键带 metadata）
+  evict.js     自动清理（定时任务）
+  github.js    Releases 资产的上传/删除/下载
+  names.js     路径与文件名校验
+  config.js    配置
+  http.js      响应工具
+scripts/
+  setup.mjs    引导管理员账号
+  filebox      命令行客户端（Bash 3.2 兼容，Worker 在 /filebox 下发）
+test/
+  evict.test.mjs  挑选待删文件的单元测试（node test/evict.test.mjs）
+```

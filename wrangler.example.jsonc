@@ -1,0 +1,78 @@
+// 复制成 wrangler.jsonc 后把尖括号里的值换成自己的。
+// wrangler.jsonc 已被 .gitignore 排除：域名、KV id、存储仓库名都不进仓库。
+{
+  "$schema": "https://unpkg.com/wrangler@4/config-schema.json",
+  "name": "filebox",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-11-01",
+  "observability": { "enabled": true },
+
+  // ───────────────────────────────────────────────────────────────────
+  //  路由。主机名在 DNS 里要有一条开了代理的占位 A 记录（比如 192.0.2.1），
+  //  Worker 用 zone 路由接管整个主机名。如果改成挂在路径下，
+  //  vars 里的 BASE_PATH 要一起改。
+  //
+  //  这里不用 "custom_domain": true：主机名上已有 DNS 记录时，
+  //  Cloudflare 会拒绝创建自定义域名（错误码 100117）。
+  //
+  //  workers.dev 和预览地址都关掉：zone 上的速率限制规则只管自有域名，
+  //  留着 workers.dev 等于留了一个绕过限流的入口。
+  // ───────────────────────────────────────────────────────────────────
+  "routes": [{ "pattern": "<主机名>/*", "zone_name": "<zone>" }],
+  "workers_dev": false,
+  "preview_urls": false,
+
+  // scripts/filebox 是命令行客户端，Worker 在 /filebox 原样下发（只填站点地址），
+  // 所以按纯文本模块打包进来，部署时自动跟仓库里的版本一致。
+  "rules": [{ "type": "Text", "globs": ["**/scripts/filebox"], "fallthrough": true }],
+
+  // 每小时自动清理一次（src/evict.js）。免费计划每个账号最多 5 个定时任务。
+  "triggers": { "crons": ["17 * * * *"] },
+
+  // 账号、token、文件索引都在这个 KV 命名空间里。
+  "kv_namespaces": [
+    { "binding": "USERS", "id": "<KV 命名空间 id>" }
+  ],
+
+  "vars": {
+    "BASE_PATH": "",
+
+    // 存储仓库（必须是私有仓库）与承载资产的 release tag，都必须填。
+    "GITHUB_REPO": "<owner>/<存储仓库>",
+    "RELEASE_TAG": "<release tag>",
+
+    // 允许的扩展名，逗号分隔，空表示不限。
+    "ALLOWED_EXT": "",
+
+    "SITE_NAME": "filebox",
+
+    // 单文件上限。免费版 Worker 的入口请求体上限是 100 MB。
+    "MAX_FILE_BYTES": "99614720",
+    "MAX_PATH_LENGTH": "300",
+    "MAX_PATH_SEGMENTS": "10",
+
+    // 自动清理与长期文件，含义见 src/config.js。
+    "MAX_FILES_PER_USER": "300",
+    "MAX_KEEP_PER_USER": "20",
+    "MAX_KEEP_TOTAL": "200",
+    "EVICT_HIGH": "950",
+    "EVICT_LOW": "900",
+    "EVICT_BATCH": "40",
+
+    // PBKDF2 迭代次数。免费版 Worker 每请求 10ms CPU，
+    // 登录是否会被 CPU 限制打断需要实测（见 README）。
+    "PASSWORD_ITERATIONS": "100000",
+
+    // 带 ?v=<assetId> 的下载地址内容不会变，可以缓存很久；
+    // 不带版本号的地址同名文件可能被覆盖，TTL 短一些。
+    "ASSET_TTL": "604800",
+    "VERSIONED_TTL": "31536000",
+    "CACHE_ENABLED": "true",
+
+    "API_TIMEOUT_MS": "20000"
+  }
+
+  // 两个需要手工设置的 secret：
+  //   npx wrangler secret put GITHUB_TOKEN    （Releases 读写权限）
+  //   npx wrangler secret put SESSION_SECRET  （随机长串，签名会话 cookie）
+}
