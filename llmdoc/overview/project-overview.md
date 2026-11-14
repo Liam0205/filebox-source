@@ -23,7 +23,7 @@
 
 ## 部署状态
 
-以本地的 `wrangler.jsonc`、`npx wrangler deployments list` 和 Cloudflare 面板为准，本文不记录部署信息。
+以 `wrangler.jsonc`、`npx wrangler deployments list` 和 Cloudflare 面板为准，本文不记录部署信息。`wrangler.jsonc` 和其他部署信息在单独的私有仓库里维护，见 `guides/deploy-and-test.md` 的「部署」一节。
 
 - 存储：私有仓库里的一个 release，仓库和 tag 见 `wrangler.jsonc` 的 `GITHUB_REPO`、`RELEASE_TAG`。
 - KV 命名空间：`filebox-users`，id 见 `wrangler.jsonc`。

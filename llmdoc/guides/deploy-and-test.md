@@ -56,7 +56,7 @@ curl "http://127.0.0.1:8801/__scheduled?cron=17+*+*+*+*"
 
 ## 部署
 
-`wrangler.jsonc` 不进仓库。第一次部署先 `cp wrangler.example.jsonc wrangler.jsonc`，填上域名、KV 命名空间 id、存储仓库和 release tag。线上用的那份只在部署的机器上。
+`wrangler.jsonc` 不进仓库。第一次部署先 `cp wrangler.example.jsonc wrangler.jsonc`，填上域名、KV 命名空间 id、存储仓库和 release tag。线上用的那份放在单独的私有仓库里维护，源码目录里的 `wrangler.jsonc` 是指向它的软链接。wrangler 按软链接所在的目录解析 `main`，所以部署照常在源码目录运行。
 
 ```bash
 npx -y wrangler@4.161.0 secret put GITHUB_TOKEN
