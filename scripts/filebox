@@ -33,12 +33,16 @@
 # 所以不用关联数组、mapfile、${var,,}、curl 的 --fail-with-body，
 # 也不依赖 python3 或 jq：需要解析的响应都让服务端用 ?format=text 返回纯文本。
 # 变量后面紧跟中文（包括全角标点）时必须写成 ${name}：macOS 的 Bash 3.2 在 UTF-8 下
-# 会把中文的首字节当成变量名的一部分，"$new（" 读成变量 new\xef，在 set -u 下直接报错。
+# 会把中文的首字节当成变量名的一部分。比如变量 new 后面直接跟「（」而不加花括号，会被
+# 读成变量 new\xef，在 set -u 下直接报错。
 set -euo pipefail
 
 # Worker 下发脚本时会把这两行替换成站点地址和版本号；仓库里的副本保持原样。
 DEFAULT_URL=""
 VERSION="dev"
+# 所有请求都带这个 UA，方便在访问统计里把命令行和浏览器、裸 curl 分开，也能看出
+# 还有哪些旧版本在跑。UA 可以伪造，服务端只能拿它做统计，不能据此放行或区别对待。
+UA="filebox-cli/$VERSION"
 
 BASE="${FILEBOX_URL:-$DEFAULT_URL}"
 if [ -z "$BASE" ]; then
@@ -70,7 +74,7 @@ api() {
   local out code
   need_token
   API_CODE=""
-  if ! out=$(curl "$QUIET" -S --max-time 0 -w "$NL%{http_code}" -H "Authorization: Bearer $TOKEN" "$@"); then
+  if ! out=$(curl "$QUIET" -S --max-time 0 -A "$UA" -w "$NL%{http_code}" -H "Authorization: Bearer $TOKEN" "$@"); then
     return 1
   fi
   code=${out##*"$NL"}
@@ -271,7 +275,7 @@ case "$cmd" in
       exit 1
     fi
     link=$(api "$BASE/api/url?format=text&path=$(q "$1")")
-    curl "$PROGRESS" -S --fail --max-time 0 -o "$out" "$link"
+    curl "$PROGRESS" -S --fail --max-time 0 -A "$UA" -o "$out" "$link"
     echo "已保存到 $out"
     ;;
 
@@ -296,7 +300,7 @@ case "$cmd" in
     # shellcheck disable=SC2064
     trap "rm -f '$tmp'" EXIT
     cp -p "$self" "$tmp"
-    if ! curl -fsS --max-time 120 -o "$tmp" "$BASE/filebox"; then
+    if ! curl -fsS --max-time 120 -A "$UA" -o "$tmp" "$BASE/filebox"; then
       echo "下载失败：$BASE/filebox" >&2
       exit 1
     fi

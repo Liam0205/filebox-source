@@ -34,6 +34,8 @@ make CC="gcc -std=gnu89" CFLAGS_FOR_BUILD="-std=gnu89 -w"   # 新版 gcc 默认�
 
 测的时候用这个 bash 显式运行脚本（`$D/bash-3.2.57/bash ./filebox …`）。PATH 换成一个目录，里面只放 curl、od、sed、basename、dd、wc、mktemp、cmp、cat、mv、cp、rm、head 的软链接，用来确认脚本没有偷偷用到别的工具。改完脚本还要跑一遍 `shellcheck -s bash scripts/filebox`。
 
+脚本里所有的 curl 调用都要带 `-A "$UA"`，`UA` 是 `filebox-cli/$VERSION`。新加 curl 调用时别漏掉，否则这些请求在访问统计里会混进直接用 curl 的流量。服务端不能根据 UA 放行或区别对待请求。
+
 变量后面紧跟中文（包括全角标点）时必须写成 `${name}`。macOS 的 Bash 3.2 在 UTF-8 locale 下会把中文的首字节算进变量名，`"$new（"` 被读成变量 `new\xef`，在 `set -u` 下报 unbound variable。Linux 上编的 Bash 3.2 测不出这个问题，因为 glibc 在 UTF-8 locale 下不把单个高位字节当成字母。下面这条命令应当没有输出：
 
 ```bash
