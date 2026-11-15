@@ -93,3 +93,9 @@ token 只从 `Authorization: Bearer` 读，不接受查询串。查询串会进�
 `.dev.vars` 里 `SWEEP_ORPHANS="false"`，它会盖过 `wrangler.jsonc` 的 vars。线上配置里这一项是 `true`，源码目录里的 `wrangler.jsonc` 又是指向线上配置的软链接。
 
 本地 KV 和线上 KV 是两份，GitHub release 却是同一个。本地跑对账，线上文件在本地 KV 里都查不到，全会被当成孤儿删掉。`orphanDoubt` 只是第二道保险，线上 release 里文件很少时它挡不住。
+
+## 17. 分段下载用原生流拼接
+
+`src/download.js` 的 `serveParts` 用 `FixedLengthStream` 把各段接成响应流，不能换回 `TransformStream`。
+
+`TransformStream` 是 JS 实现，每个数据块都要经过 JS，线上一个 200 MiB 的文件下到一百多 MB 就会因为超出 CPU 限制被掐断。它的响应还不带 `Content-Length`，被掐断时客户端拿到半个文件也不报错。本地 dev 不限制 CPU，这个问题在本地测不出来。

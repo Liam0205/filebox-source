@@ -8,7 +8,7 @@
 
 ## must/
 
-- `llmdoc/must/invariants.md`：改代码和配置前必须守住的十六条安全与数据不变量，涉及下载与缓存的先后顺序、身份怎样校验，以及主动内容和 GitHub 凭据怎样防止外泄；每条都写了守住它的代码位置和破坏后的后果。
+- `llmdoc/must/invariants.md`：改代码和配置前必须守住的十七条安全与数据不变量，涉及下载与缓存的先后顺序、身份怎样校验、主动内容和 GitHub 凭据怎样防止外泄，以及分段下载怎样拼接；每条都写了守住它的代码位置和破坏后的后果。
 
 ## overview/
 
@@ -37,5 +37,5 @@
 - 要改登录、会话、token → 先读 `architecture/storage-and-auth.md` 的「身份模型」一节。
 - 要改自动清理或长期文件 → 先读 `architecture/storage-and-auth.md` 的「自动清理」一节和 `must/invariants.md` 第 14 条，改完按 `guides/deploy-and-test.md` 的「测自动清理」测。
 - 要改 `scripts/filebox` → 先读 `overview/project-overview.md` 里的兼容性约束，改完按 `guides/deploy-and-test.md` 的「测命令行脚本的兼容性」用 Bash 3.2 测。
-- 要改分段上传、分段下载或孤儿对账 → 先读 `architecture/storage-and-auth.md` 的「分段上传与回执」「分段下载」「孤儿对账」三节和 `must/invariants.md` 第 15、16 条，改完按 `guides/deploy-and-test.md` 的「测分段上传和孤儿对账」测。
+- 要改分段上传、分段下载或孤儿对账 → 先读 `architecture/storage-and-auth.md` 的「分段上传与回执」「分段下载」「孤儿对账」三节和 `must/invariants.md` 第 15、16、17 条，改完按 `guides/deploy-and-test.md` 的「测分段上传和孤儿对账」测。
 - 「为什么不直接用资产名做路径」→ `architecture/storage-and-auth.md`。

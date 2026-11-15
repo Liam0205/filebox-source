@@ -16,7 +16,7 @@
 | 上限 | 数值 | 本项目里的消耗 |
 | --- | --- | --- |
 | Worker 请求 | 100,000 次/天 | 所有请求 |
-| Worker CPU | 10 ms/请求 | PBKDF2 是最重的一步，线上实测登录没有超限。I/O 等待不计入，分段下载拼接的 CPU 用量还没在线上测过 |
+| Worker CPU | 10 ms/请求 | PBKDF2 是最重的一步，线上实测登录没有超限。I/O 等待不计入。分段下载必须用原生流拼接，200 MiB 的文件实测 8 ms，见 `architecture/storage-and-auth.md` |
 | Worker 墙钟时间 | 客户端连着就不限 | 大文件下载可以持续很久 |
 | Worker 入口请求体 | 100 MB（免费 zone） | 决定了段长，`PART_BYTES` 默认 95 MiB；更大的文件分段上传 |
 | Worker 内存 | 128 MB | 上传和下载都是流式，JSON 请求体有 16 KiB 上限 |

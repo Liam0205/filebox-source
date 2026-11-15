@@ -194,7 +194,12 @@ async function serveParts(cfg, ctx, rec, versioned, rangeHeader) {
 
   // 逐段接成一个流。只在上一段读完后才去取下一段，同一时刻只开一个上游连接。
   // 中途出错只能把流断掉，客户端会看到长度不足，可以用 Range 续传。
-  const { readable, writable } = new TransformStream();
+  //
+  // 必须用 FixedLengthStream，不能用 TransformStream：后者是 JS 实现，每个块都
+  // 要过一遍 JS，线上实测约 14 ms CPU/MB，一百多 MB 就会因超出 CPU 限制被掐断。
+  // FixedLengthStream 是运行时原生的流，原生流之间 pipeTo 不经过 JS；它还让
+  // 响应带上 Content-Length，流不足长时连接会报错，客户端不会把半个文件当成完整的。
+  const { readable, writable } = new FixedLengthStream(end - start + 1);
   const pump = async () => {
     try {
       for (let k = 0; k < slices.length; k += 1) {

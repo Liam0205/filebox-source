@@ -111,11 +111,13 @@ GitHub release 只当字节仓库用。下载和删除都用资产 id 走仓库�
 
 ## 分段下载
 
-`serveParts`（`src/download.js`）按顺序向 GitHub 取各段，用 `TransformStream` 接成一个响应流。每段花 2 个外部子请求（查资产、跟随签名跳转），所以段数上限 `MAX_PARTS` 是 22。Range 请求先用 `parseRange` 解析，再用 `partSlices` 换算到具体的段，只取用得到的那几段。
+`serveParts`（`src/download.js`）按顺序向 GitHub 取各段，用 `FixedLengthStream` 接成一个响应流。每段花 2 个外部子请求（查资产、跟随签名跳转），所以段数上限 `MAX_PARTS` 是 22。Range 请求先用 `parseRange` 解析，再用 `partSlices` 换算到具体的段，只取用得到的那几段。
 
 - 第一段在返回响应头之前就取好，取不到时还能返回 502；后面的段出错时只能中断流，客户端会收到一个比 `Content-Length` 短的响应。
 - 分段文件不进边缘缓存（`x-cache: BYPASS`）。Cache API 单个对象最大 512 MB，而且整个文件写缓存要多花子请求。
-- 拼接靠 `ctx.waitUntil` 保持运行。I/O 等待不计 CPU 时间，客户端连着就没有墙钟时间限制，但拼接的实际 CPU 用量在线上还没测过（见 `memory/doc-gaps.md`）。
+- 拼接靠 `ctx.waitUntil` 保持运行。I/O 等待不计 CPU 时间，客户端连着就没有墙钟时间限制。
+- 接流必须用 `FixedLengthStream` 这种运行时原生的流。`TransformStream` 是 JS 实现，每个数据块都要经过 JS。2026-11-15 线上实测，用 `TransformStream` 下载一个 200 MiB、3 段的文件，CPU 用到约 2 秒，传到 75–145 MB 时请求以 `exceededCpu` 结束；换成 `FixedLengthStream` 后，同一个文件完整下载只用了 8 ms CPU。`FixedLengthStream` 还让响应带上 `Content-Length`。用 `TransformStream` 时响应里没有这个头，流中途断掉，curl 也照样返回 0。
+- 接近 2 GiB 的文件在线上的 CPU 用量还没测过（见 `memory/doc-gaps.md`）。
 
 ## 孤儿对账
 
