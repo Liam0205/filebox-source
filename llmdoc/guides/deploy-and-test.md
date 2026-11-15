@@ -116,6 +116,21 @@ npx -y wrangler@4.161.0 deploy
 
 `GITHUB_TOKEN` 应该用 fine-grained PAT：只授权存储仓库这一个仓库，权限给 Contents: Read and write（release 资产的读写归在 Contents 下）。不要用 `gh auth token` 的 OAuth token，它能访问账号下所有仓库。
 
+### 推送 main 后自动部署
+
+线上的 Worker 在 Cloudflare 面板里连着公开源码仓库（Workers Builds），推送 main 就会构建并部署，大约一分钟。所以**推送就是部署**，推之前要先按本文在本地测完。
+
+- 公开仓库里没有 `wrangler.jsonc`。构建命令先把构建密钥 `WRANGLER_JSONC` 写成这个文件，再跑 `npm run check` 和单元测试，有一步失败就不部署：
+  `printf '%s' "$WRANGLER_JSONC" > wrangler.jsonc && npm run check && node test/evict.test.mjs`
+  部署命令是 `npx -y wrangler@4.161.0 deploy`。
+- 密钥里存的是去掉注释、压成一行的配置。带注释的原文转 base64 后有 5 KB，面板保存时报「内部错误」，压缩后不到 1 KB 就能保存。压缩用 macOS 也自带的 perl：
+  `perl -MJSON::PP -0777 -ne 's{^\s*//.*$}{}mg; print JSON::PP->new->utf8->canonical->encode(decode_json($_))' wrangler.jsonc`
+- **改 `wrangler.jsonc` 要同时更新这个密钥**。配置有两份，私有仓库里一份，构建密钥里一份；只改私有仓库的话，下一次推送会用旧配置部署，把改动覆盖掉。
+- 非生产分支的构建是关着的。打开的话，别的分支和 PR 也会往这个 Worker 上传版本。
+- 用 GitHub 上公开仓库自己的 Actions 部署不行：`wrangler deploy` 的输出里有路由和绑定的变量，公开仓库的 Actions 日志谁都能看到。Workers Builds 的日志只在面板里。
+- 本地手动 `wrangler deploy` 照样能用，但下一次推送会按仓库里的代码重新部署。没推送的本地改动，不要指望它们留在线上。
+- 构建部署出的版本，在 `wrangler deployments list` 里和手动部署的看不出区别（来源都是 `wrangler`）。要看是不是构建触发的，去面板里看构建记录。
+
 ## 线上冒烟测试
 
 冒烟测试按下面的顺序做，每一步都要看到预期结果。
