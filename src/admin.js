@@ -34,8 +34,9 @@ import {
   putUser,
 } from "./users.js";
 import { sameOrigin } from "./access.js";
-import { deleteAsset } from "./github.js";
+import { deleteAssets } from "./github.js";
 import {
+  assetIdsOf,
   deleteDirRecord,
   deleteFileRecord,
   listUser,
@@ -280,15 +281,11 @@ async function removeUser(env, cfg, name, session) {
   }
 
   // 账号名下的文件一并清理：先拿到清单，再删资产，最后删索引和账号。
+  // 大文件有好几段，每段都要删；删不掉的成为孤儿，由对账任务收拾。
   const { files, dirs } = await listUser(env, name);
   const failures = [];
   for (const f of files) {
-    try {
-      await deleteAsset(cfg, f.assetId);
-    } catch {
-      // 资产删不掉不影响索引清理，但要让调用方知道。
-      failures.push(f.path);
-    }
+    if ((await deleteAssets(cfg, assetIdsOf(f))).length) failures.push(f.path);
   }
 
   const tokens = await listTokens(env, name);
@@ -541,9 +538,10 @@ async function renderFiles(view) {
   const status = el("div", { class: "up" });
   const lim = entries.limits;
   const quota = lim ? el("p", { class: "muted" },
-    "共 " + lim.files + "/" + lim.maxFiles + " 个文件，长期 " + lim.keep + "/" + lim.maxKeep + " 个。" +
+    "共 " + lim.files + " 个文件，占用名额 " + lim.assets + "/" + lim.maxAssets + "，长期 " + lim.keep + "/" + lim.maxKeep + " 个。" +
+    "大文件分段存储，每 95 MB 左右占一个名额。" +
     "这是临时存储：超过个人上限、或者全站文件太多时，最旧的非长期文件会被自动删除。") : null;
-  const drop = el("div", { class: "drop" }, "把文件拖到这里，或点「上传文件」（单文件上限 95 MB）");
+  const drop = el("div", { class: "drop" }, "把文件拖到这里，或点「上传文件」（单文件上限 2 GB）");
   drop.addEventListener("dragover", function (e) { e.preventDefault(); drop.classList.add("hot"); });
   drop.addEventListener("dragleave", function () { drop.classList.remove("hot"); });
   drop.addEventListener("drop", function (e) {
@@ -596,12 +594,13 @@ async function renderFiles(view) {
 // fetch 拿不到上传进度，所以上传用 XMLHttpRequest。
 // 进度到 100% 只说明字节到了 Cloudflare，Worker 还要把它转给 GitHub，
 // 这一段要等服务端响应才算完。
-function sendFile(url, file, onProgress) {
+function sendFile(url, file, onProgress, extraHeaders) {
   return new Promise(function (resolve, reject) {
     const x = new XMLHttpRequest();
     x.open("POST", url);
     x.withCredentials = true;
     x.setRequestHeader("content-type", file.type || "application/octet-stream");
+    for (const k in extraHeaders || {}) x.setRequestHeader(k, extraHeaders[k]);
     x.upload.onprogress = function (e) { onProgress(e.loaded, e.lengthComputable ? e.total : file.size); };
     x.upload.onload = function () { onProgress(file.size, file.size); };
     x.onload = function () {
@@ -616,6 +615,51 @@ function sendFile(url, file, onProgress) {
     x.onabort = function () { reject(new Error("已取消")); };
     x.send(file);
   });
+}
+
+// 507：release 满了，服务端已经清理了一批旧文件，重传一次。
+async function sendRetry(url, body, onProgress, headers) {
+  try {
+    return await sendFile(url, body, onProgress, headers);
+  } catch (e) {
+    if (e.status !== 507 || !/已自动清理/.test(e.message)) throw e;
+    say(e.message);
+    return sendFile(url, body, onProgress, headers);
+  }
+}
+
+let limits = null;
+async function uploadLimits() {
+  if (!limits) limits = await api("/api/upload/limits");
+  return limits;
+}
+
+// 大文件按服务端给的段长切开，逐段上传换回执，最后交回全部回执。
+// 一段失败就整个放弃：已经传上去的段没有索引，过几个小时会被自动清掉。
+async function sendParts(path, file, lim, onProgress) {
+  const of = Math.ceil(file.size / lim.partBytes);
+  const id = Array.from(crypto.getRandomValues(new Uint8Array(12)), function (b) {
+    return b.toString(16).padStart(2, "0");
+  }).join("");
+  const q = "path=" + encodeURIComponent(path);
+  const receipts = [];
+  for (let n = 1; n <= of; n++) {
+    const from = (n - 1) * lim.partBytes;
+    const blob = file.slice(from, Math.min(file.size, from + lim.partBytes), "application/octet-stream");
+    const url = location.origin + BASE + "/api/upload/part?" + q + "&id=" + id + "&n=" + n + "&of=" + of + "&size=" + file.size;
+    const r = await sendRetry(url, blob, function (loaded) { onProgress(from + loaded, file.size, n, of); });
+    receipts.push(r.receipt);
+  }
+  onProgress(file.size, file.size, of, of);
+  const res = await fetch(location.origin + BASE + "/api/upload/complete?" + q + "&overwrite=1", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "content-type": "text/plain", "x-file-type": file.type || "application/octet-stream" },
+    body: receipts.join("\\n"),
+  });
+  const data = await res.json().catch(function () { return {}; });
+  if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+  return data;
 }
 
 let uploading = false;
@@ -633,20 +677,22 @@ async function uploadFiles(list, view, status) {
   status.replaceChildren(line, bar);
   let done = 0;
   try {
+    const lim = await uploadLimits();
     for (let i = 0; i < files.length; i++) {
       const f = files[i];
       const tag = files.length > 1 ? "（" + (i + 1) + "/" + files.length + "）" : "";
-      if (f.size > 95 * 1024 * 1024) {
-        say(f.name + " 超过 95 MB，跳过", "err");
+      if (f.size > lim.maxFileBytes) {
+        say(f.name + " 超过单文件上限 " + sizeText(lim.maxFileBytes) + "，跳过", "err");
         continue;
       }
       const name = f.name.replace(/[\\/\\u0000-\\u001f\\u007f]/g, "_").trim() || "file";
       const path = joinPath(curDir, name);
       const target = location.origin + BASE + "/api/upload?path=" + encodeURIComponent(path) + "&overwrite=1";
-      let start = Date.now();
-      const progress = function (loaded, total) {
+      const start = Date.now();
+      const progress = function (loaded, total, n, of) {
           bar.max = total || 1;
           bar.value = loaded;
+          const seg = of > 1 ? "第 " + n + "/" + of + " 段，" : "";
           if (total && loaded >= total) {
             line.textContent = "正在上传 " + name + tag + "：已传到服务器，正在写入 GitHub…";
             return;
@@ -654,24 +700,19 @@ async function uploadFiles(list, view, status) {
           const secs = (Date.now() - start) / 1000;
           const rate = secs > 0.5 ? "，" + sizeText(loaded / secs) + "/s" : "";
           const pct = total ? "（" + Math.floor(loaded * 100 / total) + "%）" : "";
-          line.textContent = "正在上传 " + name + tag + "：" + sizeText(loaded) + " / " + sizeText(total) + pct + rate;
+          line.textContent = "正在上传 " + name + tag + "：" + seg + sizeText(loaded) + " / " + sizeText(total) + pct + rate;
       };
       try {
-        try {
-          await sendFile(target, f, progress);
-        } catch (e) {
-          // 507：release 满了，服务端已经清理了一批旧文件，重传一次。
-          if (e.status !== 507 || !/已自动清理/.test(e.message)) throw e;
-          say(e.message);
-          start = Date.now();
-          await sendFile(target, f, progress);
-        }
+        if (f.size > lim.partBytes) await sendParts(path, f, lim, progress);
+        else await sendRetry(target, f, progress);
         done += 1;
       } catch (e) {
         say(name + " 上传失败：" + e.message, "err");
         break;
       }
     }
+  } catch (e) {
+    say("上传失败：" + e.message, "err");
   } finally {
     uploading = false;
     status.replaceChildren();
@@ -759,7 +800,7 @@ function tokenForm(view) {
         el("code", {}, d.token),
         el("div", { class: "muted" }, "安装命令行工具（放进 PATH 里任意目录）："),
         el("code", {}, "curl -fsSL " + location.origin + BASE + "/filebox -o filebox && chmod +x filebox"),
-        el("div", { class: "muted" }, "然后 export FILEBOX_TOKEN=上面的 token，运行 filebox ls 试试。")
+        el("div", { class: "muted" }, "然后 export FILEBOX_TOKEN=上面的 token，运行 filebox whoami 检查一下。以后用 filebox update 升级。")
       );
     } catch (e) { say(e.message, "err"); }
   };

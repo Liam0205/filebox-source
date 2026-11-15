@@ -5,6 +5,10 @@
 //
 // 缓存键里带 assetId（v 参数），所以覆盖上传会自然换一个键，不需要
 // 跨节点失效；代价是旧对象的缓存要等它自己过期。
+//
+// 分段存储的大文件由 Worker 按顺序向 GitHub 取各段、接成一个流返回。
+// Range 请求换算到具体的段，只取用得到的那几段。大文件不进缓存：
+// Cache API 单个对象上限 512 MB，而且每次都整段写缓存也太费。
 
 import { methodNotAllowed, text } from "./http.js";
 import { basename, encodePath, isPathSegments } from "./names.js";
@@ -81,6 +85,10 @@ export async function serveFile(request, env, cfg, ctx, user, path, url) {
 
   const range = request.headers.get("range");
 
+  if (Array.isArray(rec.parts) && rec.parts.length > 1) {
+    return serveParts(cfg, ctx, rec, versioned, range);
+  }
+
   if (cache && !range) {
     const hit = await cache.match(key);
     if (hit) {
@@ -120,4 +128,91 @@ export async function serveFile(request, env, cfg, ctx, user, path, url) {
   }
 
   return out;
+}
+
+// 解析单个区间 bytes=a-b / bytes=a- / bytes=-n。多区间和不合法的写法返回 null，
+// 调用方按整文件处理（RFC 9110 允许忽略 Range）。越界返回 "unsatisfiable"。
+export function parseRange(header, size) {
+  const m = /^bytes=(\d*)-(\d*)$/.exec(String(header || "").trim());
+  if (!m || (m[1] === "" && m[2] === "")) return null;
+  let start;
+  let end;
+  if (m[1] === "") {
+    const n = Number(m[2]);
+    if (n === 0) return "unsatisfiable";
+    start = Math.max(0, size - n);
+    end = size - 1;
+  } else {
+    start = Number(m[1]);
+    end = m[2] === "" ? size - 1 : Math.min(Number(m[2]), size - 1);
+    if (start >= size) return "unsatisfiable";
+    if (end < start) return null;
+  }
+  return { start, end };
+}
+
+// 纯函数：把 [start, end] 换算成每段要取的区间 [{ index, from, to }]（段内偏移，含两端）。
+export function partSlices(sizes, start, end) {
+  const out = [];
+  let off = 0;
+  for (let i = 0; i < sizes.length; i += 1) {
+    const lo = off;
+    const hi = off + sizes[i] - 1;
+    off += sizes[i];
+    if (hi < start || lo > end) continue;
+    out.push({ index: i, from: Math.max(start, lo) - lo, to: Math.min(end, hi) - lo });
+  }
+  return out;
+}
+
+async function serveParts(cfg, ctx, rec, versioned, rangeHeader) {
+  const sizes = rec.parts.map((p) => p.s);
+  const size = rec.size;
+  const r = rangeHeader ? parseRange(rangeHeader, size) : null;
+  if (r === "unsatisfiable") {
+    return new Response(null, { status: 416, headers: { "content-range": `bytes */${size}` } });
+  }
+  const start = r ? r.start : 0;
+  const end = r ? r.end : size - 1;
+  const slices = partSlices(sizes, start, end);
+
+  // 先把第一段的连接建好：GitHub 不可用时还能返回 502，而不是一个中途断掉的 200。
+  const fetchSlice = async (s) => {
+    const whole = s.from === 0 && s.to === sizes[s.index] - 1;
+    const res = await assetDownload(cfg, rec.parts[s.index].a, whole ? null : `bytes=${s.from}-${s.to}`);
+    if (res.status !== 200 && res.status !== 206) {
+      throw new Error(`第 ${s.index + 1} 段上游返回 ${res.status}`);
+    }
+    return res;
+  };
+  let first;
+  try {
+    first = await fetchSlice(slices[0]);
+  } catch (err) {
+    return text(`上游不可达：${err.message}`, 502);
+  }
+
+  // 逐段接成一个流。只在上一段读完后才去取下一段，同一时刻只开一个上游连接。
+  // 中途出错只能把流断掉，客户端会看到长度不足，可以用 Range 续传。
+  const { readable, writable } = new TransformStream();
+  const pump = async () => {
+    try {
+      for (let k = 0; k < slices.length; k += 1) {
+        const res = k === 0 ? first : await fetchSlice(slices[k]);
+        await res.body.pipeTo(writable, { preventClose: true });
+      }
+      await writable.close();
+    } catch (err) {
+      console.log(JSON.stringify({ partsError: err.message, path: rec.path }));
+      await writable.abort(err).catch(() => {});
+    }
+  };
+  // 响应体还在被客户端读的时候，运行时会让 Worker 一直活着；waitUntil 是保险。
+  ctx.waitUntil(pump());
+
+  const headers = new Headers(baseHeaders(cfg, rec, versioned));
+  headers.set("content-length", String(end - start + 1));
+  headers.set("x-cache", "BYPASS");
+  if (r) headers.set("content-range", `bytes ${start}-${end}/${size}`);
+  return new Response(readable, { status: r ? 206 : 200, headers });
 }

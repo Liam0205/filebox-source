@@ -46,18 +46,26 @@
 
     "SITE_NAME": "filebox",
 
-    // 单文件上限。免费版 Worker 的入口请求体上限是 100 MB。
-    "MAX_FILE_BYTES": "99614720",
+    // 免费版 Worker 的入口请求体上限是 100 MB，所以一次请求最多传一段（PART_BYTES）。
+    // 更大的文件由客户端分段上传，单文件上限 MAX_FILE_BYTES（最多 22 段）。
+    "PART_BYTES": "99614720",
+    "MAX_FILE_BYTES": "2147483648",
     "MAX_PATH_LENGTH": "300",
     "MAX_PATH_SEGMENTS": "10",
 
-    // 自动清理与长期文件，含义见 src/config.js。
-    "MAX_FILES_PER_USER": "300",
+    // 自动清理与长期文件，含义见 src/config.js。「名额」是 release 里的资产，
+    // 大文件一段占一个。
+    "MAX_ASSETS_PER_USER": "300",
     "MAX_KEEP_PER_USER": "20",
     "MAX_KEEP_TOTAL": "200",
     "EVICT_HIGH": "950",
     "EVICT_LOW": "900",
     "EVICT_BATCH": "40",
+
+    // 孤儿资产对账：release 里有、索引里没有、创建超过 ORPHAN_HOURS 小时的 fb_ 资产会被删掉。
+    // 本地开发的 KV 是空的，打开它会把线上文件全当成孤儿，所以只在线上配置里设成 true。
+    "ORPHAN_HOURS": "6",
+    "SWEEP_ORPHANS": "false",
 
     // PBKDF2 迭代次数。免费版 Worker 每请求 10ms CPU，
     // 登录是否会被 CPU 限制打断需要实测（见 README）。

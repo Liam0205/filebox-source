@@ -43,8 +43,19 @@ const MAX_JSON_BYTES = 16 * 1024;
 export async function readJson(request) {
   const ct = request.headers.get("content-type") || "";
   if (!ct.includes("application/json")) return null;
+  const raw = await readText(request, MAX_JSON_BYTES);
+  if (raw == null) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+// 读取文本请求体，超过 limit 字节返回 null。
+export async function readText(request, limit) {
   const declared = Number(request.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > MAX_JSON_BYTES) return null;
+  if (Number.isFinite(declared) && declared > limit) return null;
   if (!request.body) return null;
 
   // 没有 Content-Length（chunked）时边读边数。
@@ -55,7 +66,7 @@ export async function readJson(request) {
     const { done, value } = await reader.read();
     if (done) break;
     total += value.byteLength;
-    if (total > MAX_JSON_BYTES) {
+    if (total > limit) {
       await reader.cancel().catch(() => {});
       return null;
     }
@@ -67,9 +78,5 @@ export async function readJson(request) {
     buf.set(c, off);
     off += c.byteLength;
   }
-  try {
-    return JSON.parse(new TextDecoder().decode(buf));
-  } catch {
-    return null;
-  }
+  return new TextDecoder().decode(buf);
 }

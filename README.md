@@ -10,7 +10,7 @@
 脚本 ───┘                      └─ GitHub 私有仓库的 release 资产（文件字节）
 ```
 
-- **字节**存在一个私有仓库的 release 里，每个文件对应一个资产。
+- **字节**存在一个私有仓库的 release 里。一般的文件对应一个资产；超过 95 MiB 的文件切成几段，每段一个资产，下载时 Worker 按顺序拼回去。
 - **路径与归属**存在 Workers KV：`user:<名>`、`token:<摘要>`、`file:<用户>:<路径>`、`dir:<用户>:<路径>`。
 - **下载**走 Worker 代理，不 302 到 GitHub：私有资产的下载地址是约一小时过期的签名 URL，域名在部分网络下也不稳定。
 
@@ -22,8 +22,9 @@
 - 文件管理：任意深的虚拟目录、拖拽上传、下载、复制链接、删除文件、新建/删除空目录。
 - 每个用户只能看到和操作自己名下的文件；管理员可以代管。
 - 下载公开、无需登录。上传需要账号会话或 `Authorization: Bearer <token>`。
-- 命令行：`filebox`，一个 Bash 脚本，站点在 `/filebox` 下发。
-- 临时存储，会自动清理：每个用户最多 300 个文件，全站超过 950 个时删到 900 个，先删最旧的。想保留的文件可以设为长期，每人最多 20 个，全站最多 200 个。见下面的「自动清理」。
+- 单文件最大 2 GiB。超过 95 MiB 的文件由命令行和网页自动分段上传，下载地址仍然只有一个，支持 Range。
+- 命令行：`filebox`，一个 Bash 脚本，站点在 `/filebox` 下发。`filebox whoami` 检查 token 配得对不对，`filebox update` 把脚本自己升级到站点上的版本。
+- 临时存储，会自动清理。计数单位是「名额」，也就是 release 里的资产：普通文件占 1 个，大文件每段占 1 个。每个用户最多占 300 个名额，全站超过 950 个时删到 900 个，先删最旧的。想保留的文件可以设为长期，每人最多 20 个，全站长期文件最多占 200 个名额。见下面的「自动清理」。
 
 ## 免费额度的真实边界
 
@@ -32,14 +33,15 @@
 | 资源 | 免费额度 | 对应到本项目的含义 |
 | --- | --- | --- |
 | Worker 请求 | 100,000 次/天 | 下载、页面、API 合计 |
-| Worker 入口请求体 | 100 MB | 单文件上限默认 95 MiB，可在 `MAX_FILE_BYTES` 调整 |
+| Worker 入口请求体 | 100 MB | 一次请求最多传一段，段长默认 95 MiB（`PART_BYTES`） |
+| Worker 外部子请求 | 每次调用 50 个 | 下载大文件时每段花 2 个，所以一个文件最多 22 段 |
 | KV 读 | 100,000 次/天 | 每次下载 1 次读；列文件读 metadata，不逐条读 |
 | KV 写 | 1,000 次/天 | 每次上传约 1 次 |
 | KV 删 | 1,000 次/天 | 每次删除约 1 次 |
 | KV list | 1,000 次/天 | 每次列目录 2 次；`/api/files` 每次调用都会 list；定时清理每小时 1 次 |
 | KV 存储 | 1 GB | 索引很小，主要限制在 GitHub 侧 |
 | GitHub release 资产数 | 1,000 个 | 所有用户合计共用一个 release，自动清理把它控制在 950 以内 |
-| GitHub 单资产 | < 2 GiB | 实际受 Worker 100 MB 入口限制 |
+| GitHub 单资产 | < 2 GiB | 一段一个资产，用不到这么大；单文件上限 2 GiB 是本项目自己定的（`MAX_FILE_BYTES`） |
 
 **超额不会扣费**：免费计划下超出额度时对应操作直接报错。这也是这个方案不用 R2 的原因——R2 超量会计费。
 
@@ -47,15 +49,17 @@
 
 ## 自动清理
 
-filebox 是临时存储。release 最多放 1000 个资产，所以 Worker 每小时跑一次定时任务（`src/evict.js`），按下面的顺序删文件：
+filebox 是临时存储。release 最多放 1000 个资产，所以 Worker 每小时跑一次定时任务（`src/evict.js`），按名额删文件。一个名额就是 release 里的一个资产，分段上传的大文件有几段就占几个名额。删除顺序如下：
 
 1. 长期文件永远不删。
-2. 某个用户的文件超过 300 个（长期文件也算在内），先删他自己最旧的文件，删到 300 个。一个人批量上传，挤掉的是他自己的旧文件。
-3. 全站文件数还超过 950 个，再删全站最旧的文件，删到 900 个。
+2. 某个用户占的名额超过 300 个（长期文件也算在内），先删他自己最旧的文件，删到 300 个以内。一个人批量上传或者传大文件，挤掉的是他自己的旧文件。
+3. 全站名额还超过 950 个，再删全站最旧的文件，删到 900 个以内。
 
-每次最多删 40 个，剩下的留给下一个小时。免费计划每次调用最多发 50 个外部子请求，删一个文件要调一次 GitHub。两次定时任务之间如果 release 被传满，上传会返回 507：服务端当场清理一批，命令行和网页会自动重传一次。
+每次最多删 40 个资产，剩下的留给下一个小时。免费计划每次调用最多发 50 个外部子请求，删一个资产要调一次 GitHub。两次定时任务之间如果 release 被传满，上传会返回 507：服务端当场清理一批，命令行和网页会自动重传一次。
 
-设为长期：网页文件列表里的「设为长期」，或者 `filebox keep <路径>`。每个用户最多 20 个，全站最多 200 个。长期文件一直占着名额，所以有上限。所有数值都在 `wrangler.jsonc` 的 `vars` 里。
+设为长期：网页文件列表里的「设为长期」，或者 `filebox keep <路径>`。每个用户最多 20 个文件，全站长期文件最多占 200 个名额。长期文件一直占着名额，所以有上限；全站按名额算，是为了防止长期的大文件把 release 占满。所有数值都在 `wrangler.jsonc` 的 `vars` 里。
+
+定时任务清理完还会对账：release 里有、索引里没有的 `fb_` 资产（孤儿）创建超过 6 小时（`ORPHAN_HOURS`）就删掉。孤儿来自中断的分段上传、写索引失败的上传，以及删除时没删干净的段。对账要在 `SWEEP_ORPHANS` 设成 `true` 时才跑。本地开发的 KV 和线上不是同一份，却连着同一个 release，打开它会把线上文件当成孤儿，所以默认是关的。另外，一半以上的 `fb_` 资产都像孤儿时，对账任务认为 KV 和 release 对不上，一个都不删。
 
 被清理的文件没有任何通知，链接直接 404。
 
@@ -89,7 +93,7 @@ Worker 用 zone 路由接管一个主机名：DNS 里给这个主机名加一条
 ## 本地开发
 
 ```bash
-cp .dev.vars.example .dev.vars     # 填 GITHUB_TOKEN 和 SESSION_SECRET；ENFORCE_HTTPS 保持 false
+cp .dev.vars.example .dev.vars     # 填 GITHUB_TOKEN 和 SESSION_SECRET；ENFORCE_HTTPS 和 SWEEP_ORPHANS 保持 false
 FILEBOX_PASSWORD='…' node scripts/setup.mjs admin --role admin
 npx wrangler dev --local-upstream 127.0.0.1:8787
 ```
@@ -104,6 +108,7 @@ npx wrangler dev --local-upstream 127.0.0.1:8787
 curl -fsSL https://<站点>/filebox -o filebox && chmod +x filebox   # 放进 PATH 里的任意目录
 export FILEBOX_TOKEN=fb_…          # 在 /admin 里生成，只显示一次
 
+filebox whoami                          # 检查 token：打印用户名、角色和 token 的名字
 filebox put ./photo.jpg album/2026.jpg   # 成功后打印下载地址；同名默认拒绝，-f 覆盖
 filebox ls
 filebox url album/2026.jpg               # 打印可直接分享的下载地址
@@ -112,15 +117,21 @@ filebox mkdir album/2027
 filebox rm album/2026.jpg
 filebox rmdir album/2027                 # 只删空目录
 filebox keep album/2026.jpg              # 设为长期，不参与自动清理；unkeep 取消
+filebox update                           # 从站点下载新版，替换这个脚本自己
+filebox version
 ```
 
-`ls` 的第一行是用量，例如 `alice：12/300 个文件，长期 3/20 个`；长期文件在列表里标着 `keep`。
+`ls` 的第一行是用量，例如 `alice：12 个文件，占用名额 20/300，长期 3/20 个`；长期文件在列表里标着 `keep`。
+
+超过 95 MiB 的文件，`put` 会自动用 `dd` 切段，逐段上传，每段打印一行进度，最后提交。上传中断的话，已经传上去的段会在 6 小时后被对账任务删掉，重新 `put` 一次即可。`get` 不用管分段，站点会拼成一个文件返回。
+
+`update` 先找到脚本自己在磁盘上的位置（通过 PATH 里的软链接调用也能找到真实文件），把新版下载到同一个目录的临时文件里，检查过开头的 `#!`、版本号和 `bash -n` 语法后，再用 `mv` 原子替换。脚本所在目录不可写时会拒绝，并打印手工更新的命令。`update` 和 `version` 不需要 token。站点下发脚本时，会把脚本内容的摘要填进 `VERSION`，所以版本号只是用来比较新旧的标识，没有大小顺序。
 
 用仓库里的 `scripts/filebox` 时，要另外设置 `FILEBOX_URL`。
 
 `put` 和 `get` 在终端里会显示 curl 的进度条。stderr 被重定向时不显示；设置 `FILEBOX_QUIET=1` 也可以关掉。上传的进度条走到 100% 只说明文件到了 Cloudflare，之后还要等 Worker 把它写进 GitHub，写完才打印下载地址。网页端上传同样有进度条，到 100% 后会提示「正在写入 GitHub」；下载交给浏览器自己的下载进度。
 
-脚本要在 macOS 自带的 Bash 3.2 上运行，只依赖 curl 和 od，有 `file` 命令时用它判断文件类型，没有就按 `application/octet-stream` 上传。它不用 python3 或 jq；`ls`、`url`、`put` 需要的结果由服务端通过 `?format=text` 直接返回纯文本。2026-11-15 用 Bash 3.2.57（与 macOS 自带的版本相同）跑过全部命令。
+脚本要在 macOS 自带的 Bash 3.2 上运行，只依赖 curl、od 和 sed，分段上传另外要用 dd、wc、mktemp，有 `file` 命令时用它判断文件类型，没有就按 `application/octet-stream` 上传。它不用 python3 或 jq；`ls`、`url`、`put` 需要的结果由服务端通过 `?format=text` 直接返回纯文本。2026-11-15 用 Bash 3.2.57（与 macOS 自带的版本相同）跑过全部命令，包括 250 MB 文件的分段上传和下载。
 
 ## HTTP 接口
 
@@ -140,11 +151,17 @@ DELETE /admin/api/tokens/:key
 文件接口（会话 cookie 或 `Authorization: Bearer`）：
 
 ```
-GET    /api/me
+GET    /api/whoami[?format=text]          当前身份和所用 token；/api/me 是旧名字，仍然可用
 GET    /api/files[?user=][&format=text]   管理员可加 ?user=
 GET    /api/url?path=…[&format=text]      取可直接下载的地址
 POST   /api/upload?path=…[&overwrite=1][&format=text]
-                                         PUT 也行。请求体就是文件字节，必须带 Content-Length
+                                         PUT 也行。请求体就是文件字节，必须带 Content-Length，
+                                         最多一段（默认 95 MiB），更大的文件走分段上传
+GET    /api/upload/limits[?format=text]   段长和单文件上限；text 格式是一行「段长 上限」
+POST   /api/upload/part?path=…&id=…&n=…&of=…&size=…[&format=text]
+                                         上传第 n 段（共 of 段，文件总长 size），返回一张回执
+POST   /api/upload/complete?path=…[&overwrite=1][&format=text]
+                                         请求体是全部回执，一行一张；可带 X-File-Type 头
 DELETE /api/file?path=…
 POST   /api/folder                       {"path": "a/b"}，或者把 path 放在查询串里
 DELETE /api/folder?path=…                只删空目录
@@ -152,7 +169,14 @@ POST   /api/keep?path=…[&format=text]    设为长期；超过上限返回 409
 DELETE /api/keep?path=…[&format=text]    取消长期
 ```
 
-`/api/files` 的 JSON 里有 `limits`（`files`、`maxFiles`、`keep`、`maxKeep`），每个文件有 `keep` 字段。上传在 release 满了时返回 507，响应里的 `evicted` 是当场清理掉的文件数，大于 0 时重传即可。
+`/api/files` 的 JSON 里有 `limits`（`files`、`assets`、`maxAssets`、`keep`、`maxKeep`，`assets` 是已占的名额），每个文件有 `keep` 字段和 `parts` 字段（占几个名额）。上传在 release 满了时返回 507，响应里的 `evicted` 是当场清理掉的文件数，大于 0 时重传即可。
+
+分段上传的规矩：
+
+- 除最后一段外，每段都必须正好是段长，段数 `of` 必须等于总长除以段长向上取整，最多 22 段。服务端按这些数核对每一段的 `Content-Length`。
+- `id` 是客户端随机取的上传 id（8 到 64 个 `[A-Za-z0-9_-]`），同一个文件的各段用同一个 id。
+- 回执由服务端签名，里面有用户、路径、上传 id、段号和这一段的资产 id，约 5 小时后过期（比孤儿判定时长少 1 小时）。`complete` 只接受同一个用户、同一个路径、同一次上传、段号齐全的回执。
+- 中间不写 KV，`complete` 时才写一次索引。同名文件存在又没带 `overwrite=1` 时，`complete` 返回 409，并删掉刚传上去的段。
 
 加 `format=text` 时，`files` 返回逐行的文件列表，`url` 和 `upload` 只返回一行完整的下载地址。
 
@@ -181,12 +205,14 @@ DELETE /api/keep?path=…[&format=text]    取消长期
 - **退出登录不吊销已签发的 cookie**：会话是无状态的，被窃取的 cookie 在 7 天内仍然有效。要立即作废某账号的所有会话，改一次口令。
 - **删除不是立即全网生效**：Worker 每次都先查 KV，删除后新的请求立即 404；但已经缓存过的浏览器会继续用旧内容，不带版本号的地址最长 7 天，带 `?v=` 的地址最长一年。
 - 上传要求 `Content-Length`，不能用 chunked 请求体（GitHub 的资产上传接口本身也要求长度）。
-- 单文件受 Worker 入口 100 MB 限制，不是 GitHub 的 2 GiB。更大文件目前没有通道。
+- 单文件最大 2 GiB（`MAX_FILE_BYTES`），同时不能超过 22 段。段数上限来自下载：每段要花 2 个外部子请求，免费计划每次调用最多 50 个。
+- **分段的大文件不进边缘缓存**，每次下载都从 GitHub 取：Cache API 单个对象最大 512 MB，而且整段写缓存很费子请求。拼接只是在 Worker 里转发字节，CPU 用量在线上还没有实测过。
+- 旧版命令行脚本没有 `update` 命令，也不会分段上传，要手工重新下载一次 `/filebox`。
 - 索引是 KV 上的扁平键，用户多、文件多时列目录会变慢并消耗 KV list 配额；这个设计的目标是几百到几千个文件。
-- **个人文件数上限是软的**：每小时才检查一次，两次检查之间一个用户可以暂时超过 300 个。
+- **个人名额上限是软的**：每小时才检查一次，两次检查之间一个用户可以暂时超过 300 个。
 - **长期文件的计数不是强一致的**：两个请求同时设置长期，可能略超上限（KV 最终一致）。
 - **release 满了时的兜底靠猜**：GitHub 没有文档说明 release 满了返回什么，代码把上传返回的 422 当作「满了」。正常情况下定时任务会把数量控制在 950 以内，碰不到这条路径。
-- **孤儿资产不计入**：清理按 KV 索引计数。上传成功但写索引失败留下的资产，不会被计数，也不会被清理。
+- **孤儿资产不计入名额**：清理按 KV 索引计数，孤儿要等对账任务删掉。对账没打开时，它们会一直占着 release 的位置。几乎是空的 release 里如果有孤儿，会被「一半以上像孤儿就不删」这条保护挡住，要等别的文件多起来才会被删。
 - 资产名里的用户部分没有做转义隐藏：知道 URL 的人能看到 `fb_<用户>_` 前缀，这不算敏感信息（下载本来就是公开的）。
 
 ## 目录
@@ -196,12 +222,12 @@ src/
   worker.js    路由与首页
   admin.js     管理页（单页应用）与账号/token 接口
   files.js     文件管理 API
-  download.js  公开下载、Range、缓存
+  download.js  公开下载、Range、缓存、分段拼接
   access.js    身份解析（token / 会话）、同源校验
   auth.js      口令哈希、会话签名、token 生成
   users.js     KV：用户、token
   store.js     KV：文件与目录索引（文件键带 metadata）
-  evict.js     自动清理（定时任务）
+  evict.js     自动清理与孤儿对账（定时任务）
   github.js    Releases 资产的上传/删除/下载
   names.js     路径与文件名校验
   config.js    配置
@@ -210,7 +236,7 @@ scripts/
   setup.mjs    引导管理员账号
   filebox      命令行客户端（Bash 3.2 兼容，Worker 在 /filebox 下发）
 test/
-  evict.test.mjs  挑选待删文件的单元测试（node test/evict.test.mjs）
+  evict.test.mjs  挑选待删文件、找孤儿、Range 换算到段、配置默认值的单元测试（node test/evict.test.mjs）
 ```
 
 ## 许可证

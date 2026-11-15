@@ -96,6 +96,39 @@ export async function deleteAsset(cfg, assetId) {
   }
 }
 
+// 按顺序删一批资产，遇到错误就停（GitHub 出问题时别把子请求额度耗在失败上）。
+// 返回没删掉的 id；调用方通常先删了索引，这些资产会成为孤儿，由对账任务收拾。
+export async function deleteAssets(cfg, ids) {
+  for (let i = 0; i < ids.length; i += 1) {
+    try {
+      await deleteAsset(cfg, ids[i]);
+    } catch (err) {
+      console.log(JSON.stringify({ deleteError: err.message, left: ids.length - i }));
+      return ids.slice(i);
+    }
+  }
+  return [];
+}
+
+// 列出 release 里的资产，给孤儿对账用：[{ id, name, created }]。
+// 每页 100 个，一页花一个外部子请求；release 最多 1000 个资产，10 页就列完。
+export async function listAssets(cfg, maxPages = 10) {
+  const id = await releaseId(cfg);
+  const out = [];
+  for (let page = 1; page <= maxPages; page += 1) {
+    const res = await call(
+      cfg,
+      `${API}/repos/${repoOf(cfg)}/releases/${id}/assets?per_page=100&page=${page}`,
+      { headers: headers(cfg) },
+    );
+    if (!res.ok) throw new Error(`列资产失败：HTTP ${res.status}`);
+    const batch = await res.json();
+    for (const a of batch) out.push({ id: a.id, name: a.name, created: a.created_at });
+    if (batch.length < 100) return { assets: out, complete: true, pages: page };
+  }
+  return { assets: out, complete: false, pages: maxPages };
+}
+
 // 资产的下载地址不是稳定的公开 URL：私有仓库要先拿一个 302 签名地址。
 // 签名地址约 1 小时过期，且指向 release-assets.githubusercontent.com，
 // 所以这里手工跟随跳转，避免把 GitHub token 发给另一个域名。

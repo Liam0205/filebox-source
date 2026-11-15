@@ -147,6 +147,42 @@ export function sessionPayload(user, role, ver) {
   };
 }
 
+// ── 分段上传的回执 ─────────────────────────────────────────────────────
+//
+// 大文件一段一段上传，每段传完 Worker 返回一张签名回执，最后客户端把回执
+// 交回来，Worker 校验后才写索引。这样中间不用写 KV，也不用信任客户端报的资产 id。
+// 签名的消息带 "receipt:" 前缀，和会话 cookie 的签名区分开，两者不能互相冒用。
+
+const RECEIPT_DOMAIN = "receipt:";
+
+export async function signReceipt(secret, payload) {
+  const body = b64url(enc.encode(JSON.stringify(payload)));
+  const key = await hmacKey(secret);
+  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(RECEIPT_DOMAIN + body));
+  return `${body}.${b64url(sig)}`;
+}
+
+export async function readReceipt(secret, value) {
+  const parts = String(value || "").split(".");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
+  try {
+    const key = await hmacKey(secret);
+    const ok = await crypto.subtle.verify(
+      "HMAC",
+      key,
+      unb64url(parts[1]),
+      enc.encode(RECEIPT_DOMAIN + parts[0]),
+    );
+    if (!ok) return null;
+    const payload = JSON.parse(new TextDecoder().decode(unb64url(parts[0])));
+    if (!payload || typeof payload.e !== "number") return null;
+    if (payload.e < Math.floor(Date.now() / 1000)) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
 export function sessionCookie(cfg, value) {
   const attrs = [
     `fb_session=${value}`,

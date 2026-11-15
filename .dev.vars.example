@@ -4,3 +4,5 @@ SESSION_SECRET=""
 PASSWORD_ITERATIONS="100000"
 # 本地是 http，关掉 http→https 跳转。
 ENFORCE_HTTPS="false"
+# 本地 KV 和线上不是同一份，不能删「孤儿」资产。会盖过 wrangler.jsonc 里的 true。
+SWEEP_ORPHANS="false"

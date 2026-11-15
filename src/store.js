@@ -1,11 +1,14 @@
 // 文件索引。KV 里记「用户 + 虚拟路径 → GitHub 资源 id」，GitHub 只当字节仓库。
 //
 // 键空间（与 users.js 共用 USERS 命名空间）：
-//   file:<user>:<encodeURIComponent(path)> → { path, assetId, assetName, size, type, created, keep? }
+//   file:<user>:<encodeURIComponent(path)> → { path, assetId, assetName?, size, type, created, keep?, parts? }
 //   dir:<user>:<encodeURIComponent(path)>  → { created }
 //
-// 文件键另带 metadata { a: assetId, s: size, c: created, t: type, k?: 1 }。
-// KV list 会把 metadata 一起返回，所以列文件、统计长期文件、挑最旧的文件
+// 大文件分段存成好几个资产，parts 按顺序记下每段 [{ a: assetId, s: 字节数 }]，
+// assetId 等于第一段的 id（用作下载地址的版本号）。只有一段的文件没有 parts。
+//
+// 文件键另带 metadata { a: assetId, s: size, c: created, t: type, k?: 1, p?: [各段 id] }。
+// KV list 会把 metadata 一起返回，所以列文件、统计名额、挑最旧的文件、找孤儿资产
 // 都只花一次 list，不必逐条 get；没有 metadata 的旧记录才回退到 get。
 //
 // 目录是可空的显式记录；文件路径隐含的目录不需要单独记录。
@@ -41,14 +44,26 @@ export async function putFile(env, user, record) {
 }
 
 // metadata 上限 1024 字节。type 是上传者给的，截断后才放进去。
+// 段 id 是 9–10 位整数，MAX_PARTS 段加起来也只有两百多字节。
 function fileMeta(rec) {
   const m = { a: rec.assetId, s: rec.size, c: rec.created, t: String(rec.type || "").slice(0, 200) };
   if (rec.keep) m.k = 1;
+  if (rec.parts && rec.parts.length > 1) m.p = rec.parts.map((p) => p.a);
   return m;
 }
 
 function fromMeta(path, m) {
-  return { path, assetId: m.a, size: m.s, created: m.c, type: m.t, keep: Boolean(m.k) };
+  const rec = { path, assetId: m.a, size: m.s, created: m.c, type: m.t, keep: Boolean(m.k) };
+  // 列表只需要各段的 id；段长只在下载时用，那时会 get 完整记录。
+  if (Array.isArray(m.p)) rec.partIds = m.p;
+  return rec;
+}
+
+// 一个文件占用的全部资产 id。完整记录看 parts，列表里的记录看 partIds。
+export function assetIdsOf(rec) {
+  if (Array.isArray(rec.parts) && rec.parts.length) return rec.parts.map((p) => p.a);
+  if (Array.isArray(rec.partIds) && rec.partIds.length) return rec.partIds;
+  return [rec.assetId];
 }
 
 export async function deleteFileRecord(env, user, path) {
@@ -88,12 +103,17 @@ function decodeKeyPath(key, prefix) {
 }
 
 // 把一批文件键还原成记录：有 metadata 的直接用，没有的再 get。
+// 没能还原的键（解码失败、读的时候刚被删）记在返回数组的 dropped 上。
 async function filesFromKeys(env, keys, prefixOf) {
   const out = [];
   const missing = [];
+  let dropped = 0;
   for (const k of keys) {
     const path = decodeKeyPath(k.name, prefixOf(k.name));
-    if (path == null) continue;
+    if (path == null) {
+      dropped += 1;
+      continue;
+    }
     if (k.metadata && k.metadata.a != null) out.push({ key: k.name, rec: fromMeta(path, k.metadata) });
     else missing.push(k.name);
   }
@@ -102,8 +122,10 @@ async function filesFromKeys(env, keys, prefixOf) {
     const recs = await Promise.all(chunk.map((name) => env.USERS.get(name, "json")));
     recs.forEach((rec, j) => {
       if (rec) out.push({ key: chunk[j], rec: { ...rec, keep: Boolean(rec.keep) } });
+      else dropped += 1;
     });
   }
+  out.dropped = dropped;
   return out;
 }
 
@@ -129,18 +151,23 @@ export async function listUser(env, user) {
   return { files, dirs };
 }
 
-// 全站文件，给自动清理和长期文件计数用：[{ user, path, assetId, created, keep }]。
+// 全站文件，给自动清理、长期文件计数、孤儿资产对账用：
+// [{ user, path, assetId, assets: [id...], created, keep }]。
 // 用户名不含 ":"（见 NAME_RE），所以 "file:" 后第一个 ":" 就是用户名的结尾。
 export async function listAllFiles(env) {
   const keys = await listKeys(env, FILE_PREFIX);
   const prefixOf = (name) => name.slice(0, name.indexOf(":", FILE_PREFIX.length) + 1);
-  return (await filesFromKeys(env, keys, prefixOf)).map(({ key, rec }) => ({
+  const found = await filesFromKeys(env, keys, prefixOf);
+  const out = found.map(({ key, rec }) => ({
     user: key.slice(FILE_PREFIX.length, key.indexOf(":", FILE_PREFIX.length)),
     path: rec.path,
     assetId: rec.assetId,
+    assets: assetIdsOf(rec),
     created: rec.created,
     keep: rec.keep,
   }));
+  out.dropped = found.dropped;
+  return out;
 }
 
 // 目录非空判定：只要存在位于其下的文件或子目录，就不算空。

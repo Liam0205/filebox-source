@@ -81,3 +81,15 @@ token 只从 `Authorization: Bearer` 读，不接受查询串。查询串会进�
 `src/evict.js` 的 `planEviction` 跳过 `keep` 的文件；`evict` 删除前用 `getFile` 重读记录，`keep` 为真或者 `assetId` 和 list 时不一致就跳过。
 
 用户把文件设为长期，就是在要求它不被自动删除，删了就是丢数据。不重读的话，list 之后刚被覆盖上传的文件，会连新资产一起被删掉。
+
+## 15. 分段回执比孤儿判定先过期
+
+`src/config.js` 的 `orphanTimes` 让回执有效期（`receiptSeconds`）总是小于孤儿判定时长（`orphanHours`），单元测试里有断言。
+
+回执还有效、对应的段却已经被当成孤儿删掉的话，有人提交这组回执，索引里就会有一个缺段的文件，下载到一半中断。调 `ORPHAN_HOURS` 时也要大于一次分段上传实际要花的时间，否则上传会因为回执过期而失败。
+
+## 16. 本地开发不打开孤儿对账
+
+`.dev.vars` 里 `SWEEP_ORPHANS="false"`，它会盖过 `wrangler.jsonc` 的 vars。线上配置里这一项是 `true`，源码目录里的 `wrangler.jsonc` 又是指向线上配置的软链接。
+
+本地 KV 和线上 KV 是两份，GitHub release 却是同一个。本地跑对账，线上文件在本地 KV 里都查不到，全会被当成孤儿删掉。`orphanDoubt` 只是第二道保险，线上 release 里文件很少时它挡不住。

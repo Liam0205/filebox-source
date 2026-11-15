@@ -14,8 +14,9 @@ import { currentActor, sameOrigin } from "./access.js";
 import { handleFilesApi } from "./files.js";
 import { serveFile } from "./download.js";
 import { handleAdmin } from "./admin.js";
-import { evict } from "./evict.js";
+import { evict, sweepOrphans } from "./evict.js";
 import { esc, html, json, notFound, text } from "./http.js";
+import { sha256Hex } from "./auth.js";
 // wrangler.jsonc 的 rules 把这个文件按纯文本打包进来。
 import CLI_SCRIPT from "../scripts/filebox";
 
@@ -42,11 +43,23 @@ export default {
   },
 
   // wrangler.jsonc 的 triggers.crons 每小时触发一次，规则见 evict.js。
+  // 先清理，剩下的外部子请求额度（免费版每次 50 个）留给孤儿对账。
   async scheduled(controller, env, ctx) {
     const cfg = resolveConfig(env);
     if (!env.USERS || !cfg.githubToken || !cfg.repo || !cfg.releaseTag) return;
     const r = await evict(env, cfg);
-    console.log(JSON.stringify({ cron: controller.cron, total: r.total, planned: r.planned, evicted: r.deleted }));
+    let sweep = { skipped: "SWEEP_ORPHANS 没打开" };
+    if (cfg.sweepOrphans) {
+      sweep = await sweepOrphans(env, cfg, 48 - r.used).catch((err) => ({ error: err.message }));
+    }
+    console.log(JSON.stringify({
+      cron: controller.cron,
+      total: r.total,
+      assets: r.assets,
+      planned: r.planned,
+      evicted: r.deleted,
+      sweep,
+    }));
   },
 };
 
@@ -99,25 +112,29 @@ async function dispatch(request, env, ctx, cfg, url) {
   return notFound(cfg);
 }
 
-// 下发命令行脚本，顺手把 DEFAULT_URL 填成当前站点。站点地址来自请求，
+// 下发命令行脚本，顺手把 DEFAULT_URL 填成当前站点，VERSION 填成脚本内容的摘要
+// （filebox update 靠它报告从哪个版本升到哪个版本）。站点地址来自请求，
 // 会被原样写进一段 shell 脚本，所以只接受最朴素的形式，不合格就留空，
 // 避免借 Host 头往脚本里注入代码。
 const SITE_RE = /^https?:\/\/[a-z0-9.-]+(:[0-9]{1,5})?(\/[A-Za-z0-9._~-]+)*$/;
 const DEFAULT_URL_LINE = 'DEFAULT_URL=""';
+const VERSION_LINE = 'VERSION="dev"';
+let scriptVersion = null;
 
-function cliScript(request, cfg, url) {
+async function cliScript(request, cfg, url) {
   if (request.method !== "GET" && request.method !== "HEAD") {
     return text("Method Not Allowed", 405, { allow: "GET, HEAD" });
   }
+  if (!scriptVersion) scriptVersion = (await sha256Hex(CLI_SCRIPT)).slice(0, 10);
   const site = `${url.origin}${cfg.basePath}`;
-  const body = SITE_RE.test(site)
-    ? CLI_SCRIPT.replace(DEFAULT_URL_LINE, `DEFAULT_URL="${site}"`)
-    : CLI_SCRIPT;
+  let body = CLI_SCRIPT.replace(VERSION_LINE, `VERSION="${scriptVersion}"`);
+  if (SITE_RE.test(site)) body = body.replace(DEFAULT_URL_LINE, `DEFAULT_URL="${site}"`);
   return new Response(request.method === "HEAD" ? null : body, {
     headers: {
       "content-type": "text/plain; charset=utf-8",
       "content-disposition": 'inline; filename="filebox"',
-      "cache-control": "public, max-age=300",
+      // filebox update 要拿到刚部署的版本，所以缓存时间短。
+      "cache-control": "public, max-age=60",
       "x-content-type-options": "nosniff",
       "content-security-policy": "default-src 'none'; sandbox",
     },
@@ -187,6 +204,7 @@ function landing(cfg, url) {
 <p>命令行工具：<a href="${esc(base)}/filebox"><code>${esc(base)}/filebox</code></a>（Bash 脚本，macOS 和 Linux 都能用）。</p>
 <pre>curl -fsSL ${esc(url.origin)}${esc(base)}/filebox -o filebox &amp;&amp; chmod +x filebox
 export FILEBOX_TOKEN=fb_…
+./filebox whoami
 ./filebox put photo.jpg</pre>
 </main></body></html>`;
   return html(body);

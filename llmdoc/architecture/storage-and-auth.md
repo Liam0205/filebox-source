@@ -4,10 +4,10 @@
 
 ```
 Worker ── KV（USERS 绑定）：用户、token、文件索引、目录
-       └─ GitHub 私有仓库的 release：文件字节，一个文件一个资产
+       └─ GitHub 私有仓库的 release：文件字节，一个文件一个资产，分段上传的大文件一段一个
 ```
 
-GitHub release 只当字节仓库用，Worker 不调 List release assets。下载和删除都用资产 id 走仓库级接口（`/repos/{repo}/releases/assets/{id}`），跟具体是哪个 release 无关，所以换 release 不影响旧文件。
+GitHub release 只当字节仓库用。下载和删除都用资产 id 走仓库级接口（`/repos/{repo}/releases/assets/{id}`），跟具体是哪个 release 无关，所以换 release 不影响旧文件。只有定时任务的孤儿对账会列 release 的资产（`listAssets`），它只看 `RELEASE_TAG` 指向的那个 release。
 
 ## 为什么资产名必须是不透明 id
 
@@ -31,20 +31,24 @@ GitHub release 只当字节仓库用，Worker 不调 List release assets。下�
 | --- | --- | --- |
 | `user:<名>` | `{name, salt, hash, iterations, role, created, disabled, ver}` | 管理页、`setup.mjs` |
 | `token:<sha256 hex>` | `{user, label, created, v}` | 管理页 |
-| `file:<用户>:<encodeURIComponent(路径)>` | `{path, assetId, assetName, size, type, created, keep?}` | 上传、设为长期 |
+| `file:<用户>:<encodeURIComponent(路径)>` | `{path, assetId, assetName?, parts?, size, type, created, keep?}` | 上传、设为长期 |
 | `dir:<用户>:<encodeURIComponent(路径)>` | `{created}` | 新建目录 |
 
 登录失败不写 KV。限流放在 zone 的速率限制规则里，见 `guides/deploy-and-test.md` 的「登录限流规则」一节。
 
-文件键另带 metadata `{a: assetId, s: size, c: created, t: type, k?: 1}`，由 `putFile` 写入。KV list 会把 metadata 一起返回，所以列一个用户的文件、统计全站长期文件、挑最旧的文件，都只花一次 list，不用逐条 get。这一点有实际意义：每人最多 300 个文件，逐条 get 的话，刷新一次列表就是 300 次 KV 读。没有 metadata 的旧记录会回退到 get（`filesFromKeys`）。改文件记录的字段时，要同时改 `fileMeta` 和 `fromMeta`，metadata 上限 1024 字节。
+文件键另带 metadata `{a: assetId, s: size, c: created, t: type, k?: 1, p?: [各段资产 id]}`，由 `putFile` 写入。KV list 会把 metadata 一起返回，所以列一个用户的文件、统计全站长期文件、挑最旧的文件，都只花一次 list，不用逐条 get。这一点有实际意义：每人最多 300 个文件，逐条 get 的话，刷新一次列表就是 300 次 KV 读。没有 metadata 的旧记录会回退到 get（`filesFromKeys`）。改文件记录的字段时，要同时改 `fileMeta` 和 `fromMeta`，metadata 上限 1024 字节。
+
+分段文件的记录多一个 `parts: [{a, s}]`（各段的资产 id 和长度，按顺序），`assetId` 取第一段的 id。metadata 里只放 `p`（各段 id），22 段的 id 加起来两百多字节，放得下。列表和清理只需要知道一个文件占哪些资产，从 metadata 就能拿到；下载要知道每段多长，所以读完整记录。取一个文件的全部资产 id 统一用 `assetIdsOf`，它对单段文件返回 `[assetId]`。
 
 ## 自动清理
 
 规则和数值见 README 的「自动清理」与 `src/config.js`，实现在 `src/evict.js`。
 
+- 计数单位是资产（名额），一个文件的权重是它的段数。用户 2026-11-15 定的：大文件占几个资产就算几个名额，否则一个人传几个 2 GiB 的文件就能占掉 release 的大半。`maxKeepPerUser` 例外，按文件数算；`maxKeepTotal` 按名额算。
 - `planEviction` 是纯函数：先按每人上限删各人最旧的，再按全站阈值删全站最旧的，长期文件一律跳过。改规则时先改它，再跑单元测试（见 `guides/deploy-and-test.md`）。
+- `purgeFile` 删一个文件的顺序是：第一段资产、KV 记录、其余各段。第一段删不掉就抛出，什么都没变；后面的段删不掉只会留下孤儿，交给对账。
 - `evict` 每删一个文件前都重读一次记录。list 拿到的是快照，期间文件可能被覆盖上传（换了资产 id）或者被设为长期，这两种情况都要跳过，否则会删掉新文件。
-- 删除不清边缘缓存。下载先查 KV（不变量第 1 条），记录没了就 404，所以缓存里的旧内容不会再被返回。这样每删一个文件只花一个外部子请求，一次能删 40 个。
+- 删除不清边缘缓存。下载先查 KV（不变量第 1 条），记录没了就 404，所以缓存里的旧内容不会再被返回。这样每删一个资产只花一个外部子请求，一次能删 40 个。一个 22 段的文件比这个批量还小，所以单个文件总能整个删掉，不会只删一半就停。
 - 触发有两处：每小时的定时任务（`scheduled`），以及上传时 GitHub 返回 422。后者因为请求体已经读掉，没法在服务端重试，只能清理一批后返回 507，由客户端重传。
 - 覆盖上传会保留长期标记，但 `created` 会更新成覆盖的时间，排队重新从最新开始。
 
@@ -85,10 +89,40 @@ GitHub release 只当字节仓库用，Worker 不调 List release assets。下�
 
 ## 上传数据流
 
-1. 校验路径（`isPathSegments`）、扩展名、`keyFits`、`Content-Length`（必须有，且不超过 `MAX_FILE_BYTES`）。
+一次请求的上传（`/api/upload`）：
+
+1. 校验路径（`isPathSegments`）、扩展名、`keyFits`、`Content-Length`（必须有，且不超过 `PART_BYTES`）。
 2. 查同名：存在且没带 `overwrite=1`，返回 409。
 3. 把请求体流式转发到 `uploads.github.com`，带上 `name`、`label` 和 `Content-Length`。
 4. 写 `file:` 索引。
-5. 覆盖上传时，删掉旧资产和旧缓存键。
+5. 覆盖上传时，删掉旧资产（分段文件的全部段）和旧缓存键。
 
-第 3 步和第 4 步之间失败的话，会留下孤儿资产（见 `memory/doc-gaps.md`）。
+第 3 步和第 4 步之间失败的话，会留下孤儿资产，由孤儿对账删掉。
+
+## 分段上传与回执
+
+免费版 Worker 的入口请求体上限是 100 MB，所以大于 `PART_BYTES` 的文件由客户端切段，一段一个请求（`/api/upload/part`），每段在 GitHub 上是一个独立资产，label 是 `<路径> (n/of)`。
+
+传段的过程中不写 KV。每段传完，服务端返回一张回执：`{u, p, i, n, of, z, a, s, e}`，分别是用户、路径摘要（SHA-256 前 32 位 hex）、上传 id、段号、段数、文件总长、资产 id、段长、过期时间，用 `SESSION_SECRET` 做 HMAC 签名，签名前加了 `receipt:` 前缀，和会话 cookie 的签名区分开。客户端最后把全部回执交给 `/api/upload/complete`，服务端只靠验签和核对就能写索引，不需要中间状态。这样一次分段上传只写一次 KV，KV 每天 1,000 次的写额度不会被大文件吃掉。
+
+`complete` 核对的内容：回执属于当前用户和这个路径；全部来自同一个上传 id、段数和总长一致；段号 1..of 各一张；各段长度加起来等于总长。同一组回执提交两次时，第二次直接返回已有的记录，否则覆盖逻辑会把刚写进索引的段当成旧资产删掉。
+
+回执的有效期比孤儿判定时长短（`orphanTimes`，默认判定 6 小时、回执 5 小时）。顺序反过来的话，对账任务可能先删掉某一段，随后才有人拿着回执提交，索引里就会有一个缺段的文件。
+
+## 分段下载
+
+`serveParts`（`src/download.js`）按顺序向 GitHub 取各段，用 `TransformStream` 接成一个响应流。每段花 2 个外部子请求（查资产、跟随签名跳转），所以段数上限 `MAX_PARTS` 是 22。Range 请求先用 `parseRange` 解析，再用 `partSlices` 换算到具体的段，只取用得到的那几段。
+
+- 第一段在返回响应头之前就取好，取不到时还能返回 502；后面的段出错时只能中断流，客户端会收到一个比 `Content-Length` 短的响应。
+- 分段文件不进边缘缓存（`x-cache: BYPASS`）。Cache API 单个对象最大 512 MB，而且整个文件写缓存要多花子请求。
+- 拼接靠 `ctx.waitUntil` 保持运行。I/O 等待不计 CPU 时间，客户端连着就没有墙钟时间限制，但拼接的实际 CPU 用量在线上还没测过（见 `memory/doc-gaps.md`）。
+
+## 孤儿对账
+
+`sweepOrphans`（`src/evict.js`）在每小时的定时任务里、清理之后运行，子请求预算是 48 减去清理用掉的。它列出 release 里全部资产（REST 分页，GraphQL 的 ReleaseAsset 没有数据库 id），挑出 `fb_` 开头、索引里没有、创建超过 `ORPHAN_HOURS` 的资产删掉。不是 `fb_` 开头的资产是别人手工放的，不碰。
+
+对账删错了就是丢数据，所以保护比清理多：
+
+- `SWEEP_ORPHANS` 默认关，线上配置打开，本地 `.dev.vars` 关掉（理由见 `must/invariants.md` 第 16 条）。
+- `listAllFiles` 有键没能还原成记录时（`dropped`）不对账，那条记录引用的资产会被误判成孤儿。
+- 一半以上的 `fb_` 资产都像孤儿时不删（`orphanDoubt`）。这通常说明 KV 和 release 对不上。

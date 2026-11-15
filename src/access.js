@@ -26,7 +26,12 @@ export async function currentActor(request, env, cfg) {
     if ((rec.v || 0) !== (user.ver || 0)) {
       return { error: "token 已失效，请在管理页重新生成", status: 401 };
     }
-    return { user: user.name, role: user.role, via: "token" };
+    return {
+      user: user.name,
+      role: user.role,
+      via: "token",
+      token: { label: rec.label || "", created: rec.created || "" },
+    };
   }
 
   const payload = await readSession(

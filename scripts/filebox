@@ -5,6 +5,7 @@
 #   export FILEBOX_URL=https://…        # 从站点 /filebox 下载的脚本已带默认值
 #   export FILEBOX_QUIET=1              # 可选，关掉 put/get 在终端里的进度条
 #
+#   filebox whoami                           # 检查 token 是否配置正确
 #   filebox put ./photo.jpg                  # 上传到根目录，成功后打印下载地址
 #   filebox put ./photo.jpg album/2026.jpg   # 上传到指定路径（同名默认拒绝）
 #   filebox put -f ./photo.jpg album/2026.jpg  # 覆盖同名文件
@@ -16,19 +17,24 @@
 #   filebox rmdir album/2026                 # 只删空目录
 #   filebox keep album/2026.jpg              # 设为长期，不参与自动清理
 #   filebox unkeep album/2026.jpg            # 取消长期
+#   filebox update                           # 从站点下载新版，替换这个脚本
+#   filebox version
 #
-# 这是临时存储：超过个人文件数上限、或者全站文件太多时，
-# 最旧的非长期文件会被自动删除。ls 第一行显示用量。
+# 单文件上限 2 GiB。超过 95 MiB 的文件会自动分段上传，下载时站点自动拼回一个文件。
 #
-# 只依赖 bash、curl、od，有 file 命令时用它判断文件类型。
+# 这是临时存储：超过个人名额、或者全站文件太多时，最旧的非长期文件会被自动删除。
+# 大文件每 95 MiB 左右占一个名额。ls 第一行显示用量。
+#
+# 依赖 bash、curl、od、sed，分段上传还要 dd、wc、mktemp；有 file 命令时用它判断文件类型。
 #
 # 兼容性要求：要能在 macOS 自带的 Bash 3.2、BSD 工具和旧版 curl 上跑。
 # 所以不用关联数组、mapfile、${var,,}、curl 的 --fail-with-body，
 # 也不依赖 python3 或 jq：需要解析的响应都让服务端用 ?format=text 返回纯文本。
 set -euo pipefail
 
-# Worker 下发脚本时会把这一行替换成站点地址；仓库里的副本保持为空。
+# Worker 下发脚本时会把这两行替换成站点地址和版本号；仓库里的副本保持原样。
 DEFAULT_URL=""
+VERSION="dev"
 
 BASE="${FILEBOX_URL:-$DEFAULT_URL}"
 if [ -z "$BASE" ]; then
@@ -37,10 +43,6 @@ if [ -z "$BASE" ]; then
 fi
 BASE="${BASE%/}"
 TOKEN="${FILEBOX_TOKEN:-}"
-if [ -z "$TOKEN" ]; then
-  echo "需要设置 FILEBOX_TOKEN（在 $BASE/admin 里生成）" >&2
-  exit 1
-fi
 NL='
 '
 
@@ -50,11 +52,19 @@ QUIET=-s
 PROGRESS=-s
 if [ -t 2 ] && [ -z "${FILEBOX_QUIET:-}" ]; then PROGRESS=-#; fi
 
+need_token() {
+  if [ -z "$TOKEN" ]; then
+    echo "需要设置 FILEBOX_TOKEN（在 $BASE/admin 里生成）" >&2
+    exit 1
+  fi
+}
+
 # 调接口。成功时把响应体写到 stdout；HTTP 状态不是 2xx 时把响应体写到 stderr，返回 1。
 # 最近一次的 HTTP 状态码留在 API_CODE 里（网络错误时为空）。
 API_CODE=""
 api() {
   local out code
+  need_token
   API_CODE=""
   if ! out=$(curl "$QUIET" -S --max-time 0 -w "$NL%{http_code}" -H "Authorization: Bearer $TOKEN" "$@"); then
     return 1
@@ -72,6 +82,14 @@ api() {
       return 1
       ;;
   esac
+}
+
+# 上传类请求遇到 507（release 满了，服务端已经清理了一批旧文件）时重传一次。
+api_retry() {
+  if api "$@"; then return 0; fi
+  if [ "$API_CODE" != "507" ]; then return 1; fi
+  echo "重新上传一次…" >&2
+  api "$@"
 }
 
 # 百分号编码。每个字节都编码成 %xx，服务端照样能解开；
@@ -99,6 +117,58 @@ need() {
   fi
 }
 
+# 这个脚本在磁盘上的真实路径。从 PATH 里运行时 $0 是完整路径；
+# 用 bash filebox 运行时 $0 是相对路径；中间如果有软链接，一层层解开。
+# macOS 的 readlink 没有 -f，所以自己循环。
+self_path() {
+  local p="$0" link n=0
+  case "$p" in
+    */*) ;;
+    *)
+      if [ -f "$p" ]; then p="./$p"; else p=$(command -v "$p" 2>/dev/null || true); fi
+      ;;
+  esac
+  if [ -z "$p" ] || [ ! -f "$p" ]; then return 1; fi
+  while [ -h "$p" ] && [ "$n" -lt 40 ]; do
+    link=$(readlink "$p")
+    case "$link" in
+      /*) p="$link" ;;
+      *) p="${p%/*}/$link" ;;
+    esac
+    n=$((n + 1))
+  done
+  printf '%s/%s\n' "$(cd "${p%/*}" && pwd -P)" "${p##*/}"
+}
+
+# 分段上传：按服务端给的段长用 dd 切出临时文件，逐段上传换回执，最后交回全部回执。
+# 一段失败就整个放弃：已经传上去的段没有索引，过几个小时会被自动清掉。
+put_parts() {
+  local src="$1" dest="$2" size="$3" part_bytes="$4" type="$5" overwrite="$6"
+  local of mib id part n receipt receipts="" qd
+  of=$(( (size + part_bytes - 1) / part_bytes ))
+  mib=$(( part_bytes / 1048576 ))
+  id=$(od -An -tx1 -N12 -v /dev/urandom)
+  id=${id//[!0-9a-f]/}
+  qd=$(q "$dest")
+  part=$(mktemp "${TMPDIR:-/tmp}/filebox.XXXXXX")
+  # shellcheck disable=SC2064
+  trap "rm -f '$part'" EXIT
+  n=1
+  while [ "$n" -le "$of" ]; do
+    echo "第 $n/$of 段" >&2
+    dd if="$src" of="$part" bs=1048576 skip=$(( (n - 1) * mib )) count="$mib" 2>/dev/null
+    QUIET=$PROGRESS
+    receipt=$(api_retry -T "$part" -H "Expect:" -H "Content-Type: application/octet-stream" \
+      "$BASE/api/upload/part?format=text&path=$qd&id=$id&n=$n&of=$of&size=$size")
+    receipts="$receipts$receipt$NL"
+    n=$((n + 1))
+  done
+  rm -f "$part"
+  QUIET=-s
+  api -X POST -H "Content-Type: text/plain" -H "X-File-Type: $type" --data-binary "$receipts" \
+    "$BASE/api/upload/complete?format=text&path=$qd$overwrite"
+}
+
 cmd="${1:-}"
 if [ "$#" -gt 0 ]; then shift; fi
 
@@ -113,21 +183,42 @@ case "$cmd" in
       exit 1
     fi
     dest="${2:-$(basename "$src")}"
+    type=$(mime "$src")
+    size=$(wc -c < "$src")
+    size=${size//[!0-9]/}
+    # 服务端返回「段长 单文件上限」两个数。
+    limits=$(api "$BASE/api/upload/limits?format=text")
+    part_bytes=${limits%% *}
+    max_bytes=${limits##* }
+    if [ "$size" -gt "$max_bytes" ]; then
+      echo "文件有 $size 字节，超过单文件上限 $max_bytes 字节" >&2
+      exit 1
+    fi
+    if [ "$size" -gt "$part_bytes" ]; then
+      # 大文件要传很久，同名文件先查一下，免得传完才被拒绝。
+      if [ -z "$overwrite" ] && api "$BASE/api/url?format=text&path=$(q "$dest")" >/dev/null 2>&1; then
+        echo "同名文件已存在：$dest（加 -f 覆盖）" >&2
+        exit 1
+      fi
+      put_parts "$src" "$dest" "$size" "$part_bytes" "$type" "$overwrite"
+      exit 0
+    fi
     # -T 边读边传，不像 --data-binary 那样先把整个文件读进内存；方法是 PUT。
     # 清掉 Expect 头，省掉一次 100-continue 往返。
     QUIET=$PROGRESS
-    target="$BASE/api/upload?format=text&path=$(q "$dest")$overwrite"
-    type=$(mime "$src")
-    if ! api -T "$src" -H "Expect:" -H "Content-Type: $type" "$target"; then
-      # 507：release 满了，服务端已经清理了一批旧文件，重传一次。
-      if [ "$API_CODE" != "507" ]; then exit 1; fi
-      echo "重新上传一次…" >&2
-      api -T "$src" -H "Expect:" -H "Content-Type: $type" "$target"
-    fi
+    api_retry -T "$src" -H "Expect:" -H "Content-Type: $type" \
+      "$BASE/api/upload?format=text&path=$(q "$dest")$overwrite"
     ;;
 
   ls)
     api "$BASE/api/files?format=text"
+    ;;
+
+  whoami)
+    if ! api "$BASE/api/whoami?format=text"; then
+      echo "token 不能用。站点是 $BASE，检查 FILEBOX_TOKEN 和 FILEBOX_URL。" >&2
+      exit 1
+    fi
     ;;
 
   url)
@@ -175,8 +266,47 @@ case "$cmd" in
     echo "已保存到 $out"
     ;;
 
+  version)
+    echo "filebox $VERSION（$BASE）"
+    ;;
+
+  update)
+    if ! self=$(self_path); then
+      echo "找不到脚本在磁盘上的位置（$0），请重新下载：curl -fsSL $BASE/filebox -o filebox" >&2
+      exit 1
+    fi
+    dir=${self%/*}
+    if [ ! -w "$dir" ]; then
+      echo "没有权限写 $dir，用 sudo 运行，或者把脚本放到自己能写的目录" >&2
+      exit 1
+    fi
+    # 先下载到同一目录下的临时文件，检查无误再用 mv 原子替换。不能直接覆盖：
+    # bash 是边读边执行脚本的，原地改写正在运行的脚本会让它执行错乱。
+    # cp -p 让临时文件带上原文件的权限位，curl -o 写进去时保留。
+    tmp="$dir/.filebox.update.$$"
+    # shellcheck disable=SC2064
+    trap "rm -f '$tmp'" EXIT
+    cp -p "$self" "$tmp"
+    if ! curl -fsS --max-time 120 -o "$tmp" "$BASE/filebox"; then
+      echo "下载失败：$BASE/filebox" >&2
+      exit 1
+    fi
+    new=$(sed -n 's/^VERSION="\(.*\)"$/\1/p' "$tmp")
+    if [ "$(sed -n 1p "$tmp")" != "#!/usr/bin/env bash" ] || [ -z "$new" ] || ! "$BASH" -n "$tmp"; then
+      echo "下载到的不像是 filebox 脚本，没有替换。" >&2
+      exit 1
+    fi
+    if [ "$(<"$tmp")" = "$(<"$self")" ]; then
+      echo "已经是最新版（$VERSION）：$self"
+      exit 0
+    fi
+    mv -f "$tmp" "$self"
+    echo "已更新：$VERSION → $new（$self）"
+    exit 0
+    ;;
+
   *)
-    sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,/^set -euo/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'
     exit 1
     ;;
 esac
