@@ -127,6 +127,7 @@ npx -y wrangler@4.161.0 deploy
   `perl -MJSON::PP -0777 -ne 's{^\s*//.*$}{}mg; print JSON::PP->new->utf8->canonical->encode(decode_json($_))' wrangler.jsonc`
 - **改 `wrangler.jsonc` 要同时更新这个密钥**。配置有两份，私有仓库里一份，构建密钥里一份；只改私有仓库的话，下一次推送会用旧配置部署，把改动覆盖掉。
 - 非生产分支的构建是关着的。打开的话，别的分支和 PR 也会往这个 Worker 上传版本。
+- 构建监视路径排除了 `llmdoc/**`、`.gitignore`、`LICENSE`、`NOTICE`、`README.md`，只改文档的推送不会触发部署。新加只放文档的文件或目录时，要不要也排除掉，在面板里改。
 - 用 GitHub 上公开仓库自己的 Actions 部署不行：`wrangler deploy` 的输出里有路由和绑定的变量，公开仓库的 Actions 日志谁都能看到。Workers Builds 的日志只在面板里。
 - 本地手动 `wrangler deploy` 照样能用，但下一次推送会按仓库里的代码重新部署。没推送的本地改动，不要指望它们留在线上。
 - 构建部署出的版本，在 `wrangler deployments list` 里和手动部署的看不出区别（来源都是 `wrangler`）。要看是不是构建触发的，去面板里看构建记录。
