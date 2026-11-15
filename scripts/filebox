@@ -177,12 +177,26 @@ notify() {
 }
 
 # Finder 右键菜单是 ~/Library/Services 下的一个 Automator 快速操作，里面只有一步
-# 「运行 Shell 脚本」：把选中的文件作为参数交给 filebox finder-upload。上传逻辑都在
-# 这个脚本里，filebox update 之后菜单自动用上新逻辑，不用重装。
+# 「运行 Shell 脚本」：把选中的文件作为参数交给 filebox finder-upload。
+# 快速操作调用的是脚本的一份副本，不是脚本本身：脚本可能放在「文稿」「桌面」这类
+# 受隐私保护的目录里（或者经软链接指到那里），快速操作的进程读不了，bash 会报
+# Operation not permitted。filebox update 会顺带更新这份副本。
 FINDER_WORKFLOW="$HOME/Library/Services/上传到 filebox.workflow"
+FINDER_COPY="$HOME/Library/Application Support/filebox/filebox"
 
+# 把脚本自己复制成右键菜单用的副本，先写临时文件再 mv。
+sync_finder_copy() {
+  local tmp="$FINDER_COPY.$$"
+  mkdir -p "${FINDER_COPY%/*}"
+  cp -p "$1" "$tmp"
+  mv -f "$tmp" "$FINDER_COPY"
+}
+
+# 两个文件照着 macOS 15 的 Automator 保存出来的内容写。少了 Info.plist 里的
+# NSIconName 和 document.wflow 里的 applicationPaths 等字段时，系统登记了服务，
+# 菜单里却不出现。
 install_finder() {
-  local self="$1" dir="$FINDER_WORKFLOW/Contents"
+  local dir="$FINDER_WORKFLOW/Contents"
   rm -rf "$FINDER_WORKFLOW"
   mkdir -p "$dir"
   cat > "$dir/Info.plist" <<EOF
@@ -193,6 +207,10 @@ install_finder() {
 	<key>NSServices</key>
 	<array>
 		<dict>
+			<key>NSBackgroundColorName</key>
+			<string>background</string>
+			<key>NSIconName</key>
+			<string>NSTouchBarSend</string>
 			<key>NSMenuItem</key>
 			<dict>
 				<key>default</key>
@@ -220,7 +238,7 @@ EOF
 <plist version="1.0">
 <dict>
 	<key>AMApplicationBuild</key>
-	<string>523</string>
+	<string>528</string>
 	<key>AMApplicationVersion</key>
 	<string>2.10</string>
 	<key>AMDocumentVersion</key>
@@ -276,7 +294,7 @@ EOF
 				<key>ActionParameters</key>
 				<dict>
 					<key>COMMAND_STRING</key>
-					<string>FILEBOX_URL='$BASE' exec '$self' finder-upload "\$@"</string>
+					<string>FILEBOX_URL='$BASE' exec '$FINDER_COPY' finder-upload "\$@"</string>
 					<key>CheckedForUserDefaultShell</key>
 					<true/>
 					<key>inputMethod</key>
@@ -318,10 +336,78 @@ EOF
 				<array>
 					<string>Automator</string>
 				</array>
+				<key>arguments</key>
+				<dict>
+					<key>0</key>
+					<dict>
+						<key>default value</key>
+						<integer>0</integer>
+						<key>name</key>
+						<string>inputMethod</string>
+						<key>required</key>
+						<string>0</string>
+						<key>type</key>
+						<string>0</string>
+						<key>uuid</key>
+						<string>0</string>
+					</dict>
+					<key>1</key>
+					<dict>
+						<key>default value</key>
+						<false/>
+						<key>name</key>
+						<string>CheckedForUserDefaultShell</string>
+						<key>required</key>
+						<string>0</string>
+						<key>type</key>
+						<string>0</string>
+						<key>uuid</key>
+						<string>1</string>
+					</dict>
+					<key>2</key>
+					<dict>
+						<key>default value</key>
+						<string></string>
+						<key>name</key>
+						<string>source</string>
+						<key>required</key>
+						<string>0</string>
+						<key>type</key>
+						<string>0</string>
+						<key>uuid</key>
+						<string>2</string>
+					</dict>
+					<key>3</key>
+					<dict>
+						<key>default value</key>
+						<string></string>
+						<key>name</key>
+						<string>COMMAND_STRING</string>
+						<key>required</key>
+						<string>0</string>
+						<key>type</key>
+						<string>0</string>
+						<key>uuid</key>
+						<string>3</string>
+					</dict>
+					<key>4</key>
+					<dict>
+						<key>default value</key>
+						<string>/bin/sh</string>
+						<key>name</key>
+						<string>shell</string>
+						<key>required</key>
+						<string>0</string>
+						<key>type</key>
+						<string>0</string>
+						<key>uuid</key>
+						<string>4</string>
+					</dict>
+				</dict>
 				<key>isViewVisible</key>
 				<integer>1</integer>
 				<key>location</key>
-				<string>309.000000:253.000000</string>
+				<string>336.250000:305.000000</string>
 				<key>nibPath</key>
 				<string>/System/Library/Automator/Run Shell Script.action/Contents/Resources/Base.lproj/main.nib</string>
 			</dict>
@@ -342,6 +428,10 @@ EOF
 		</dict>
 		<key>applicationPath</key>
 		<string>/System/Library/CoreServices/Finder.app</string>
+		<key>applicationPaths</key>
+		<array>
+			<string>/System/Library/CoreServices/Finder.app</string>
+		</array>
 		<key>inputTypeIdentifier</key>
 		<string>com.apple.Automator.fileSystemObject</string>
 		<key>outputTypeIdentifier</key>
@@ -349,7 +439,7 @@ EOF
 		<key>presentationMode</key>
 		<integer>15</integer>
 		<key>processesInput</key>
-		<false/>
+		<integer>0</integer>
 		<key>serviceApplicationBundleID</key>
 		<string>com.apple.finder</string>
 		<key>serviceApplicationPath</key>
@@ -359,11 +449,11 @@ EOF
 		<key>serviceOutputTypeIdentifier</key>
 		<string>com.apple.Automator.nothing</string>
 		<key>serviceProcessesInput</key>
-		<false/>
+		<integer>0</integer>
 		<key>systemImageName</key>
-		<string>NSActionTemplate</string>
+		<string>NSTouchBarSend</string>
 		<key>useAutomaticInputType</key>
-		<false/>
+		<integer>0</integer>
 		<key>workflowTypeIdentifier</key>
 		<string>com.apple.Automator.servicesMenu</string>
 	</dict>
@@ -568,10 +658,14 @@ case "$cmd" in
     fi
     if [ "$(<"$tmp")" = "$(<"$self")" ]; then
       echo "已经是最新版（${VERSION}）：$self"
-      exit 0
+    else
+      mv -f "$tmp" "$self"
+      echo "已更新：$VERSION → ${new}（${self}）"
     fi
-    mv -f "$tmp" "$self"
-    echo "已更新：$VERSION → ${new}（${self}）"
+    # 装过右键菜单的话，它用的副本也跟着更新。
+    if [ -f "$FINDER_COPY" ] && [ "$self" != "$FINDER_COPY" ]; then
+      sync_finder_copy "$self"
+    fi
     exit 0
     ;;
 
@@ -584,11 +678,11 @@ case "$cmd" in
       echo "找不到脚本在磁盘上的位置（$0），没法安装右键菜单" >&2
       exit 1
     fi
-    # 脚本路径和站点地址会原样写进快速操作的 shell 命令和 plist，含引号、反斜杠、
+    # 副本路径和站点地址会原样写进快速操作的 shell 命令和 plist，含引号、反斜杠、
     # $、反引号或 XML 特殊字符时不处理，免得转义出错。
-    case "$self$BASE" in
+    case "$FINDER_COPY$BASE" in
       *[\'\"\\\$\`\&\<\>]*)
-        echo "脚本路径或站点地址里有特殊字符，没法生成右键菜单：$self $BASE" >&2
+        echo "用户目录或站点地址里有特殊字符，没法生成右键菜单：$FINDER_COPY $BASE" >&2
         exit 1
         ;;
     esac
@@ -605,15 +699,18 @@ case "$cmd" in
       save_token "$FILEBOX_TOKEN"
       echo "已把 FILEBOX_TOKEN 保存到 $TOKEN_FILE"
     fi
-    install_finder "$self"
+    if [ "$self" != "$FINDER_COPY" ]; then sync_finder_copy "$self"; fi
+    install_finder
     echo "已安装：在 Finder 里选中文件，右键 → 快速操作 → 上传到 filebox，链接会复制到剪贴板。"
-    echo "菜单里没有的话，到「系统设置 → 隐私与安全性 → 扩展 → 访达」里把它勾上。"
-    echo "以后脚本挪了位置要重新运行一次 filebox install-finder；filebox update 之后不用重装。"
+    echo "右键菜单用的是脚本的副本：$FINDER_COPY"
+    echo "filebox update 会顺带更新它；脚本挪了位置也不用重装。"
     ;;
 
   uninstall-finder)
     rm -rf "$FINDER_WORKFLOW"
-    echo "已删除 $FINDER_WORKFLOW"
+    rm -f "$FINDER_COPY"
+    rmdir "${FINDER_COPY%/*}" 2>/dev/null || true
+    echo "已删除 $FINDER_WORKFLOW 和 $FINDER_COPY"
     ;;
 
   finder-upload)

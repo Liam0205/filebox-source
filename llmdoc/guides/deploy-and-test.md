@@ -96,6 +96,13 @@ npx -y wrangler@4.161.0 dev --port 8801 --ip 127.0.0.1 --local-upstream 127.0.0.
 - 要看的情况：多个文件一起传、文件名带引号和中文、同名文件已存在、选中目录、目录和文件混选。通知日志里的标题和正文、剪贴板文件里的链接都要对得上。
 - 用伪终端测 `login` 的交互输入时（`script -qec`），预先灌进去的 token 会在关掉回显之前被回显出来，这是测法的问题，手动粘贴时不会出现。
 
+Linux 上测不到的两件事，在 Mac 上踩过：
+
+- **菜单不出现。** 系统能登记上服务（`pbs -dump` 里看得到），Finder 的右键菜单里却没有。手写的 plist 缺了 `Info.plist` 的 `NSIconName`、`document.wflow` 的 `applicationPaths` 和动作的 `arguments` 等字段，用 Automator 打开再保存一次，菜单就出来了。现在脚本生成的两个文件照着 macOS 15 的 Automator 保存出来的内容写，只有界面显示用的本地化字符串不同（`ActionName`、`Keywords`、`AMApplication`）。改这两个文件时，在 Mac 上用 Automator 存一份，用 `plistlib` 把两边展开成键路径逐项比对，除了这几个字段和 `COMMAND_STRING` 外应当没有差别。Automator 打开后顶部显示「位于 任何应用程序」而不是「访达」，就说明 `workflowMetaData` 不对。
+- **`Operation not permitted`。** 快速操作的进程读不了「文稿」「桌面」「下载」这些受隐私保护目录里的文件，脚本放在那里（或者经软链接指到那里）时，bash 打不开脚本。所以快速操作调用的是 `~/Library/Application Support/filebox/` 下的副本，`update` 会同步它。测 `update` 时要确认副本也换成了新版。
+
+2026-11-15 在 macOS 15.7.3 上验证过：`install-finder` 之后不用另存、不用重启 Finder，菜单直接出现；脚本真身在「文稿」里时能正常运行，选中「文稿」里的文件也能上传。
+
 ## 部署
 
 `wrangler.jsonc` 不进仓库。第一次部署先 `cp wrangler.example.jsonc wrangler.jsonc`，填上域名、KV 命名空间 id、存储仓库和 release tag。线上用的那份放在单独的私有仓库里维护，源码目录里的 `wrangler.jsonc` 是指向它的软链接。wrangler 按软链接所在的目录解析 `main`，所以部署照常在源码目录运行。
