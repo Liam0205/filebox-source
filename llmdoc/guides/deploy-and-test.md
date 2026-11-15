@@ -32,7 +32,7 @@ CC="gcc -std=gnu89" CFLAGS="-O1 -w" ./configure --without-bash-malloc
 make CC="gcc -std=gnu89" CFLAGS_FOR_BUILD="-std=gnu89 -w"   # 新版 gcc 默认的 C 标准编不过 K&R 风格的旧代码
 ```
 
-测的时候用这个 bash 显式运行脚本（`$D/bash-3.2.57/bash ./filebox …`）。PATH 换成一个目录，里面只放 curl、od、sed、basename、dd、wc、mktemp、cmp、cat、mv、cp、rm、head 的软链接，用来确认脚本没有偷偷用到别的工具。改完脚本还要跑一遍 `shellcheck -s bash scripts/filebox`。
+测的时候用这个 bash 显式运行脚本（`$D/bash-3.2.57/bash ./filebox …`）。PATH 换成一个目录，里面只放 curl、od、sed、basename、dd、wc、mktemp、cmp、cat、mv、cp、rm、head、mkdir 的软链接，用来确认脚本没有偷偷用到别的工具。改完脚本还要跑一遍 `shellcheck -s bash scripts/filebox`。
 
 脚本里所有的 curl 调用都要带 `-A "$UA"`，`UA` 是 `filebox-cli/$VERSION`。新加 curl 调用时别漏掉，否则这些请求在访问统计里会混进直接用 curl 的流量。服务端不能根据 UA 放行或区别对待请求。
 
@@ -75,7 +75,7 @@ curl "http://127.0.0.1:8801/__scheduled?cron=17+*+*+*+*"
 分段和对账都会往 release 里写真实资产，要用一个临时 release，不要碰存文件的那个：
 
 ```bash
-gh release create _test_chunk -R <存储仓库> --title test --notes test
+gh release create _test_chunk -R <存储仓库> --title test --notes test --latest=false
 npx -y wrangler@4.161.0 dev --port 8801 --ip 127.0.0.1 --local-upstream 127.0.0.1:8801 --test-scheduled \
   --var RELEASE_TAG:_test_chunk --var PART_BYTES:1048576 --var ORPHAN_HOURS:0.05
 ```
@@ -84,7 +84,17 @@ npx -y wrangler@4.161.0 dev --port 8801 --ip 127.0.0.1 --local-upstream 127.0.0.
 - `ORPHAN_HOURS` 设成 0.05（3 分钟），回执的有效期是它的一半，约 1.5 分钟。它必须大于一次分段上传实际要花的时间，设得太小时 `complete` 会报「回执无效或已过期」。
 - 对账只在打开时跑。测它时临时把 `.dev.vars` 里那一行改成 `"true"`，测完马上改回来；`--var` 和 `.dev.vars` 哪个优先没有验证过，不要只靠 `--var`。命令行上必须同时有 `--var RELEASE_TAG:_test_chunk`：KV 是本地的，release 是临时的，这时打开才不会删到线上文件。
 - 要确认的事：分段文件的 sha256 和原文件一致；跨段的 Range 请求结果正确；覆盖、删除、自动清理都删掉了全部段；中断的上传留下的段在判定时长之后被对账删掉，而索引里有的段没被动。
-- 测完删掉临时 release 和它的 tag：`gh release delete _test_chunk -R <存储仓库> --cleanup-tag --yes`。然后确认存文件的那个 release 资产数没变。
+- 测完删掉临时 release 和它的 tag：`gh release delete _test_chunk -R <存储仓库> --cleanup-tag --yes`。然后确认存文件的那个 release 资产数没变。建临时 release 时要带 `--latest=false`：不带的话 Latest 标记会转到临时 release 上，删掉它之后 GitHub 不会把标记还给存文件的 release。filebox 按 tag 找 release，不受影响，但仓库页面会变样，要用 `gh release edit <tag> --latest` 改回来。
+
+## 测 Finder 右键菜单
+
+`install-finder` 和 `finder-upload` 只在 macOS 上有意义，但在 Linux 上可以测到快速操作的执行这一步，Finder 本身认不认这个快速操作只能在 Mac 上看：
+
+- 准备一个假的 `$HOME`，里面建好 `Library` 目录；PATH 前面放一个目录，里面是假的 `osascript`（把参数追加到日志文件）和 `pbcopy`（把标准输入写进文件），`install-finder` 靠 `osascript` 判断是不是 macOS。
+- 用 Python 的 `plistlib` 读生成的 `Info.plist` 和 `document.wflow`，确认格式合法，并取出 `COMMAND_STRING`。
+- 模拟 Automator 运行：`env -i HOME=<假 HOME> PATH=<假命令目录>:/usr/bin:/bin /bin/bash -c "$COMMAND_STRING" bash <文件…>`。`env -i` 是为了确认它不依赖 shell 里的 `FILEBOX_TOKEN`，只靠 `login` 存下的文件。
+- 要看的情况：多个文件一起传、文件名带引号和中文、同名文件已存在、选中目录、目录和文件混选。通知日志里的标题和正文、剪贴板文件里的链接都要对得上。
+- 用伪终端测 `login` 的交互输入时（`script -qec`），预先灌进去的 token 会在关掉回显之前被回显出来，这是测法的问题，手动粘贴时不会出现。
 
 ## 部署
 

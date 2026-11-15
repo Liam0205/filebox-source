@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # filebox 的命令行客户端。
 #
-#   export FILEBOX_TOKEN=fb_xxxx        # 在 /admin 里生成
+#   export FILEBOX_TOKEN=fb_xxxx        # 在 /admin 里生成；也可以用 filebox login 存进配置文件
 #   export FILEBOX_URL=https://…        # 从站点 /filebox 下载的脚本已带默认值
 #   export FILEBOX_QUIET=1              # 可选，关掉 put/get 在终端里的进度条
 #
+#   filebox login                            # 把 token 存进 ~/.config/filebox/token，之后不用设 FILEBOX_TOKEN
+#   filebox logout                           # 删掉存下的 token
 #   filebox whoami                           # 检查 token 是否配置正确
 #   filebox put ./photo.jpg                  # 上传到根目录，成功后打印下载地址
 #   filebox put ./photo.jpg album/2026.jpg   # 上传到指定路径（同名默认拒绝）
@@ -21,6 +23,8 @@
 #   filebox unkeep album/2026.jpg            # 取消长期
 #   filebox update                           # 从站点下载新版，替换这个脚本
 #   filebox version
+#   filebox install-finder                   # macOS：在 Finder 右键菜单里加「上传到 filebox」
+#   filebox uninstall-finder                 # macOS：去掉这个右键菜单
 #
 # 单文件上限 2 GiB。超过 95 MiB 的文件会自动分段上传，下载时站点自动拼回一个文件。
 #
@@ -28,6 +32,7 @@
 # 大文件每 95 MiB 左右占一个名额。ls 第一行显示用量。
 #
 # 依赖 bash、curl、od、sed，分段上传还要 dd、wc、mktemp；有 file 命令时用它判断文件类型。
+# login 要用 mkdir；Finder 右键菜单要用 macOS 自带的 osascript 和 pbcopy。
 #
 # 兼容性要求：要能在 macOS 自带的 Bash 3.2、BSD 工具和旧版 curl 上跑。
 # 所以不用关联数组、mapfile、${var,,}、curl 的 --fail-with-body，
@@ -50,9 +55,17 @@ if [ -z "$BASE" ]; then
   exit 1
 fi
 BASE="${BASE%/}"
-TOKEN="${FILEBOX_TOKEN:-}"
 NL='
 '
+
+# token 先看环境变量，没有再读 filebox login 存下的文件。Finder 右键菜单这类
+# 不读 shell 配置的场合拿不到环境变量，只能靠这个文件。
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/filebox"
+TOKEN_FILE="$CONFIG_DIR/token"
+TOKEN="${FILEBOX_TOKEN:-}"
+if [ -z "$TOKEN" ] && [ -r "$TOKEN_FILE" ]; then
+  TOKEN=$(sed -n -e 's/[[:space:]]//g' -e '1p' "$TOKEN_FILE")
+fi
 
 # 传输较大的 put 和 get 在 stderr 连着终端时显示 curl 的进度条（-#），
 # stderr 被重定向时保持安静。
@@ -62,7 +75,7 @@ if [ -t 2 ] && [ -z "${FILEBOX_QUIET:-}" ]; then PROGRESS=-#; fi
 
 need_token() {
   if [ -z "$TOKEN" ]; then
-    echo "需要设置 FILEBOX_TOKEN（在 $BASE/admin 里生成）" >&2
+    echo "需要设置 FILEBOX_TOKEN，或者运行 filebox login 保存 token（在 $BASE/admin 里生成）" >&2
     exit 1
   fi
 }
@@ -148,6 +161,221 @@ self_path() {
   printf '%s/%s\n' "$(cd "${p%/*}" && pwd -P)" "${p##*/}"
 }
 
+# 把 token 写进配置文件。目录和文件都只有自己能读；先写临时文件再 mv，
+# 写到一半中断也不会留下半个 token。
+save_token() {
+  local tmp="$TOKEN_FILE.$$"
+  (umask 077 && mkdir -p "$CONFIG_DIR" && printf '%s\n' "$1" > "$tmp")
+  mv -f "$tmp" "$TOKEN_FILE"
+}
+
+# macOS 的系统通知。标题和正文作为参数传给 AppleScript，不拼进脚本文本，
+# 文件名里有引号也不会出问题。
+notify() {
+  osascript -e 'on run argv' -e 'display notification (item 2 of argv) with title (item 1 of argv)' \
+    -e 'end run' "$1" "$2" >/dev/null 2>&1 || true
+}
+
+# Finder 右键菜单是 ~/Library/Services 下的一个 Automator 快速操作，里面只有一步
+# 「运行 Shell 脚本」：把选中的文件作为参数交给 filebox finder-upload。上传逻辑都在
+# 这个脚本里，filebox update 之后菜单自动用上新逻辑，不用重装。
+FINDER_WORKFLOW="$HOME/Library/Services/上传到 filebox.workflow"
+
+install_finder() {
+  local self="$1" dir="$FINDER_WORKFLOW/Contents"
+  rm -rf "$FINDER_WORKFLOW"
+  mkdir -p "$dir"
+  cat > "$dir/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSServices</key>
+	<array>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>上传到 filebox</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>runWorkflowAsService</string>
+			<key>NSRequiredContext</key>
+			<dict>
+				<key>NSApplicationIdentifier</key>
+				<string>com.apple.finder</string>
+			</dict>
+			<key>NSSendFileTypes</key>
+			<array>
+				<string>public.item</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>
+EOF
+  cat > "$dir/document.wflow" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>AMApplicationBuild</key>
+	<string>523</string>
+	<key>AMApplicationVersion</key>
+	<string>2.10</string>
+	<key>AMDocumentVersion</key>
+	<string>2</string>
+	<key>actions</key>
+	<array>
+		<dict>
+			<key>action</key>
+			<dict>
+				<key>AMAccepts</key>
+				<dict>
+					<key>Container</key>
+					<string>List</string>
+					<key>Optional</key>
+					<true/>
+					<key>Types</key>
+					<array>
+						<string>com.apple.cocoa.string</string>
+					</array>
+				</dict>
+				<key>AMActionVersion</key>
+				<string>2.0.3</string>
+				<key>AMApplication</key>
+				<array>
+					<string>Automator</string>
+				</array>
+				<key>AMParameterProperties</key>
+				<dict>
+					<key>COMMAND_STRING</key>
+					<dict/>
+					<key>CheckedForUserDefaultShell</key>
+					<dict/>
+					<key>inputMethod</key>
+					<dict/>
+					<key>shell</key>
+					<dict/>
+					<key>source</key>
+					<dict/>
+				</dict>
+				<key>AMProvides</key>
+				<dict>
+					<key>Container</key>
+					<string>List</string>
+					<key>Types</key>
+					<array>
+						<string>com.apple.cocoa.string</string>
+					</array>
+				</dict>
+				<key>ActionBundlePath</key>
+				<string>/System/Library/Automator/Run Shell Script.action</string>
+				<key>ActionName</key>
+				<string>Run Shell Script</string>
+				<key>ActionParameters</key>
+				<dict>
+					<key>COMMAND_STRING</key>
+					<string>FILEBOX_URL='$BASE' exec '$self' finder-upload "\$@"</string>
+					<key>CheckedForUserDefaultShell</key>
+					<true/>
+					<key>inputMethod</key>
+					<integer>1</integer>
+					<key>shell</key>
+					<string>/bin/bash</string>
+					<key>source</key>
+					<string></string>
+				</dict>
+				<key>BundleIdentifier</key>
+				<string>com.apple.RunShellScript</string>
+				<key>CFBundleVersion</key>
+				<string>2.0.3</string>
+				<key>CanShowSelectedItemsWhenRun</key>
+				<false/>
+				<key>CanShowWhenRun</key>
+				<true/>
+				<key>Category</key>
+				<array>
+					<string>AMCategoryUtilities</string>
+				</array>
+				<key>Class Name</key>
+				<string>RunShellScriptAction</string>
+				<key>InputUUID</key>
+				<string>6A3F2C1E-8B7D-4E5A-9C0F-1D2E3F4A5B6C</string>
+				<key>Keywords</key>
+				<array>
+					<string>Shell</string>
+					<string>Script</string>
+					<string>Command</string>
+					<string>Run</string>
+					<string>Unix</string>
+				</array>
+				<key>OutputUUID</key>
+				<string>7B4A3D2F-9C8E-4F6B-8D1A-2E3F4A5B6C7D</string>
+				<key>UUID</key>
+				<string>8C5B4E3A-AD9F-4A7C-9E2B-3F4A5B6C7D8E</string>
+				<key>UnlocalizedApplications</key>
+				<array>
+					<string>Automator</string>
+				</array>
+				<key>isViewVisible</key>
+				<integer>1</integer>
+				<key>location</key>
+				<string>309.000000:253.000000</string>
+				<key>nibPath</key>
+				<string>/System/Library/Automator/Run Shell Script.action/Contents/Resources/Base.lproj/main.nib</string>
+			</dict>
+			<key>isViewVisible</key>
+			<integer>1</integer>
+		</dict>
+	</array>
+	<key>connectors</key>
+	<dict/>
+	<key>workflowMetaData</key>
+	<dict>
+		<key>applicationBundleID</key>
+		<string>com.apple.finder</string>
+		<key>applicationBundleIDsByPath</key>
+		<dict>
+			<key>/System/Library/CoreServices/Finder.app</key>
+			<string>com.apple.finder</string>
+		</dict>
+		<key>applicationPath</key>
+		<string>/System/Library/CoreServices/Finder.app</string>
+		<key>inputTypeIdentifier</key>
+		<string>com.apple.Automator.fileSystemObject</string>
+		<key>outputTypeIdentifier</key>
+		<string>com.apple.Automator.nothing</string>
+		<key>presentationMode</key>
+		<integer>15</integer>
+		<key>processesInput</key>
+		<false/>
+		<key>serviceApplicationBundleID</key>
+		<string>com.apple.finder</string>
+		<key>serviceApplicationPath</key>
+		<string>/System/Library/CoreServices/Finder.app</string>
+		<key>serviceInputTypeIdentifier</key>
+		<string>com.apple.Automator.fileSystemObject</string>
+		<key>serviceOutputTypeIdentifier</key>
+		<string>com.apple.Automator.nothing</string>
+		<key>serviceProcessesInput</key>
+		<false/>
+		<key>systemImageName</key>
+		<string>NSActionTemplate</string>
+		<key>useAutomaticInputType</key>
+		<false/>
+		<key>workflowTypeIdentifier</key>
+		<string>com.apple.Automator.servicesMenu</string>
+	</dict>
+</dict>
+</plist>
+EOF
+  # 让系统重新扫描 Services，菜单立刻出现；这个工具不在时等系统自己发现。
+  if [ -x /System/Library/CoreServices/pbs ]; then
+    /System/Library/CoreServices/pbs -update >/dev/null 2>&1 || true
+  fi
+}
+
 # 分段上传：按服务端给的段长用 dd 切出临时文件，逐段上传换回执，最后交回全部回执。
 # 一段失败就整个放弃：已经传上去的段没有索引，过几个小时会被自动清掉。
 put_parts() {
@@ -225,6 +453,35 @@ case "$cmd" in
     dir=""
     if [ -n "${1:-}" ]; then dir="&dir=$(q "$1")"; fi
     api "$BASE/api/files?format=text$dir$recursive"
+    ;;
+
+  login)
+    # token 从标准输入读，不放在命令行参数里，免得进 shell 历史。
+    # 终端里交互输入时不回显；也可以用管道传进来，比如 pbpaste | filebox login。
+    TOKEN=""
+    if [ -t 0 ]; then
+      printf '粘贴 token（在 %s/admin 里生成，输入时不显示）：' "$BASE" >&2
+      read -r -s TOKEN || true
+      echo >&2
+    else
+      read -r TOKEN || true
+    fi
+    TOKEN=$(printf '%s' "$TOKEN" | sed 's/[[:space:]]//g')
+    if [ -z "$TOKEN" ]; then
+      echo "没有读到 token" >&2
+      exit 1
+    fi
+    if ! who=$(api "$BASE/api/whoami?format=text"); then
+      echo "token 不能用（站点是 ${BASE}），没有保存。" >&2
+      exit 1
+    fi
+    save_token "$TOKEN"
+    echo "已保存到 ${TOKEN_FILE}：$who"
+    ;;
+
+  logout)
+    rm -f "$TOKEN_FILE"
+    echo "已删除 $TOKEN_FILE"
     ;;
 
   whoami)
@@ -315,6 +572,88 @@ case "$cmd" in
     fi
     mv -f "$tmp" "$self"
     echo "已更新：$VERSION → ${new}（${self}）"
+    exit 0
+    ;;
+
+  install-finder)
+    if ! command -v osascript >/dev/null 2>&1 || [ ! -d "$HOME/Library" ]; then
+      echo "Finder 右键菜单只能装在 macOS 上" >&2
+      exit 1
+    fi
+    if ! self=$(self_path); then
+      echo "找不到脚本在磁盘上的位置（$0），没法安装右键菜单" >&2
+      exit 1
+    fi
+    # 脚本路径和站点地址会原样写进快速操作的 shell 命令和 plist，含引号、反斜杠、
+    # $、反引号或 XML 特殊字符时不处理，免得转义出错。
+    case "$self$BASE" in
+      *[\'\"\\\$\`\&\<\>]*)
+        echo "脚本路径或站点地址里有特殊字符，没法生成右键菜单：$self $BASE" >&2
+        exit 1
+        ;;
+    esac
+    # 右键菜单运行时读不到 shell 里的环境变量，token 必须在配置文件里。
+    if [ ! -s "$TOKEN_FILE" ]; then
+      if [ -z "${FILEBOX_TOKEN:-}" ]; then
+        echo "先运行 filebox login 保存 token，再安装右键菜单" >&2
+        exit 1
+      fi
+      if ! api "$BASE/api/whoami?format=text" >/dev/null; then
+        echo "FILEBOX_TOKEN 不能用（站点是 ${BASE}），没有安装。" >&2
+        exit 1
+      fi
+      save_token "$FILEBOX_TOKEN"
+      echo "已把 FILEBOX_TOKEN 保存到 $TOKEN_FILE"
+    fi
+    install_finder "$self"
+    echo "已安装：在 Finder 里选中文件，右键 → 快速操作 → 上传到 filebox，链接会复制到剪贴板。"
+    echo "菜单里没有的话，到「系统设置 → 隐私与安全性 → 扩展 → 访达」里把它勾上。"
+    echo "以后脚本挪了位置要重新运行一次 filebox install-finder；filebox update 之后不用重装。"
+    ;;
+
+  uninstall-finder)
+    rm -rf "$FINDER_WORKFLOW"
+    echo "已删除 $FINDER_WORKFLOW"
+    ;;
+
+  finder-upload)
+    # install-finder 装的快速操作调用它：逐个上传选中的文件，到根目录，同名不覆盖；
+    # 链接放进剪贴板，结果用系统通知告诉用户。运行时没有终端，出错也只能靠通知，
+    # 所以总是返回 0，免得 Automator 再弹一个看不懂的错误框。
+    links=""
+    n=0
+    failed=0
+    first_err=""
+    err=$(mktemp)
+    for f in "$@"; do
+      name=$(basename "$f")
+      if [ ! -f "$f" ]; then
+        msg="不是普通文件（目录要先打包）"
+      elif link=$("$BASH" "$0" put "$f" 2>"$err"); then
+        links="$links${link##*"$NL"}$NL"
+        n=$((n + 1))
+        continue
+      else
+        # 接口出错时 stderr 是 {"error": "…"}；网络错误时是 curl 的报错，取最后一行。
+        msg=$(sed -n 's/.*"error": *"\(.*\)".*/\1/p' "$err" | sed -n 1p)
+        if [ -z "$msg" ]; then msg=$(sed -n '$p' "$err"); fi
+      fi
+      failed=$((failed + 1))
+      if [ -z "$first_err" ]; then first_err="${name}：${msg}"; fi
+    done
+    rm -f "$err"
+    if [ "$n" -gt 0 ]; then printf '%s' "$links" | pbcopy; fi
+    if [ "$failed" -eq 0 ]; then
+      if [ "$n" -eq 1 ]; then
+        notify "filebox" "已上传 ${name}，链接已复制到剪贴板"
+      elif [ "$n" -gt 1 ]; then
+        notify "filebox" "已上传 $n 个文件，链接已复制到剪贴板"
+      fi
+    elif [ "$n" -eq 0 ]; then
+      notify "filebox 上传失败" "$first_err"
+    else
+      notify "filebox" "上传了 $n 个，失败 $failed 个。${first_err}"
+    fi
     exit 0
     ;;
 

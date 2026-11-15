@@ -106,12 +106,14 @@ npx wrangler dev --local-upstream 127.0.0.1:8787
 
 ```bash
 curl -fsSL https://<站点>/filebox -o filebox && chmod +x filebox   # 放进 PATH 里的任意目录
-export FILEBOX_TOKEN=fb_…          # 在 /admin 里生成，只显示一次
+filebox login                      # 粘贴在 /admin 里生成的 token，存进 ~/.config/filebox/token
+                                   # 也可以不存文件，改用 export FILEBOX_TOKEN=fb_…
 
 filebox whoami                          # 检查 token：打印用户名、角色和 token 的名字
 filebox put ./photo.jpg album/2026.jpg   # 成功后打印下载地址；同名默认拒绝，-f 覆盖
 filebox ls                               # 列出根目录下一层；ls album 列出 album 下一层
-filebox ls -r                            # 列出全部文件；ls -r album 只列 album 下面的filebox url album/2026.jpg               # 打印可直接分享的下载地址
+filebox ls -r                            # 列出全部文件；ls -r album 只列 album 下面的
+filebox url album/2026.jpg               # 打印可直接分享的下载地址
 filebox get album/2026.jpg ./out.jpg     # 本地已有同名文件时拒绝
 filebox mkdir album/2027
 filebox rm album/2026.jpg
@@ -119,7 +121,16 @@ filebox rmdir album/2027                 # 只删空目录
 filebox keep album/2026.jpg              # 设为长期，不参与自动清理；unkeep 取消
 filebox update                           # 从站点下载新版，替换这个脚本自己
 filebox version
+filebox install-finder                   # macOS：Finder 右键菜单加「上传到 filebox」；uninstall-finder 去掉
 ```
+
+token 先读环境变量 `FILEBOX_TOKEN`，没有再读 `filebox login` 存下的 `~/.config/filebox/token`（设置了 `XDG_CONFIG_HOME` 时放在它下面），目录和文件只有自己能读。`login` 从标准输入读 token，不经过命令行参数，所以不会进 shell 历史；终端里输入时不回显，也可以用 `pbpaste | filebox login` 这样从管道传进去。保存前会先调一次 `whoami`，token 不能用就不保存。`logout` 删掉这个文件。
+
+### Finder 右键上传（macOS）
+
+`filebox install-finder` 在 `~/Library/Services/` 下生成一个 Automator 快速操作。之后在 Finder 里选中一个或多个文件，右键 → 快速操作 → 上传到 filebox，文件会传到根目录，下载链接复制到剪贴板（多个文件一行一个），结果用系统通知显示。同名文件不覆盖，会在通知里报错；选中目录也会报错，要先打包。菜单里没有这一项时，到「系统设置 → 隐私与安全性 → 扩展 → 访达」里把它勾上。
+
+快速操作运行时读不到 shell 里的环境变量，所以要先 `filebox login` 把 token 存进文件；安装时如果文件不存在、而 `FILEBOX_TOKEN` 可用，会自动替你存一份。快速操作里只记了脚本的绝对路径和站点地址，上传逻辑在脚本自己的 `finder-upload` 子命令里，`filebox update` 之后不用重装；脚本挪了位置要重新 `install-finder`。
 
 `ls` 的第一行是整个账号的用量，例如 `alice：12 个文件，占用名额 20/300，长期 3/20 个`；下面先列子目录（`dir` 开头），再列文件，长期文件标着 `keep`。路径都是完整路径，可以直接拿去 `get`、`rm`。
 
@@ -133,7 +144,7 @@ filebox version
 
 `put` 和 `get` 在终端里会显示 curl 的进度条。stderr 被重定向时不显示；设置 `FILEBOX_QUIET=1` 也可以关掉。上传的进度条走到 100% 只说明文件到了 Cloudflare，之后还要等 Worker 把它写进 GitHub，写完才打印下载地址。网页端上传同样有进度条，到 100% 后会提示「正在写入 GitHub」；下载交给浏览器自己的下载进度。
 
-脚本要在 macOS 自带的 Bash 3.2 上运行，只依赖 curl、od 和 sed，分段上传另外要用 dd、wc、mktemp，有 `file` 命令时用它判断文件类型，没有就按 `application/octet-stream` 上传。它不用 python3 或 jq；`ls`、`url`、`put` 需要的结果由服务端通过 `?format=text` 直接返回纯文本。2026-11-15 用 Bash 3.2.57（与 macOS 自带的版本相同）跑过全部命令，包括 250 MB 文件的分段上传和下载。
+脚本要在 macOS 自带的 Bash 3.2 上运行，只依赖 curl、od 和 sed，分段上传另外要用 dd、wc、mktemp，`login` 要用 mkdir，有 `file` 命令时用它判断文件类型，没有就按 `application/octet-stream` 上传；Finder 右键菜单另外用到 macOS 自带的 osascript 和 pbcopy。它不用 python3 或 jq；`ls`、`url`、`put` 需要的结果由服务端通过 `?format=text` 直接返回纯文本。2026-11-15 用 Bash 3.2.57（与 macOS 自带的版本相同）跑过全部命令，包括 250 MB 文件的分段上传和下载。
 
 ## HTTP 接口
 
