@@ -50,7 +50,7 @@ export default {
     const r = await evict(env, cfg);
     let sweep = { skipped: "SWEEP_ORPHANS 没打开" };
     if (cfg.sweepOrphans) {
-      sweep = await sweepOrphans(env, cfg, 48 - r.used).catch((err) => ({ error: err.message }));
+      sweep = await sweepOrphans(env, cfg, 48 - r.used, r.files).catch((err) => ({ error: err.message }));
     }
     console.log(JSON.stringify({
       cron: controller.cron,

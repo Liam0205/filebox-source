@@ -66,7 +66,8 @@ export async function purgeFile(env, cfg, user, rec) {
 }
 
 // 真正执行。limit 是本次最多发出的删除请求数（一个资产一个）。
-// 返回 { total, assets, planned, deleted: [{ user, path }], used }。
+// 返回 { total, assets, planned, deleted: [{ user, path }], used, files }。
+// files 是这次 list 出来的快照，定时任务把它交给 sweepOrphans 复用，省一次全量 KV list。
 export async function evict(env, cfg, limit = cfg.evictBatch) {
   const files = await listAllFiles(env);
   const plan = planEviction(files, cfg);
@@ -94,7 +95,7 @@ export async function evict(env, cfg, limit = cfg.evictBatch) {
   }
 
   const assets = files.reduce((n, f) => n + weight(f), 0);
-  return { total: files.length, assets, planned: plan.length, deleted, used };
+  return { total: files.length, assets, planned: plan.length, deleted, used, files };
 }
 
 // 纯函数：从 release 的资产列表里挑出孤儿。只看 fb_ 开头的资产，
@@ -123,9 +124,13 @@ export function orphanDoubt(assets, orphans) {
 }
 
 // 对账。budget 是还能用的外部子请求数：查 release 1 个，列资产每页 1 个，删一个资产 1 个。
-export async function sweepOrphans(env, cfg, budget) {
+//
+// files 是自动清理刚 list 出来的全站文件快照（evict 的返回值），复用它省一次 KV list。
+// 快照里可能还留着刚被自动清理删掉的文件，它们的资产会被当成已知、这次不删，没删干净
+// 的段留给下一次对账，所以不会误删。快照比列资产早几秒，这期间新传的资产创建不到
+// orphanHours，也不会被当成孤儿。
+export async function sweepOrphans(env, cfg, budget, files) {
   if (budget < 4) return { skipped: "子请求额度不够" };
-  const files = await listAllFiles(env);
   // 有键没能还原成记录（解码失败或者读的时候刚被删）时不对账：
   // 那条记录引用的资产会被误判成孤儿。
   if (files.dropped) return { skipped: `有 ${files.dropped} 条索引没读出来` };

@@ -123,6 +123,8 @@ GitHub release 只当字节仓库用。下载和删除都用资产 id 走仓库�
 
 `sweepOrphans`（`src/evict.js`）在每小时的定时任务里、清理之后运行，子请求预算是 48 减去清理用掉的。它列出 release 里全部资产（REST 分页，GraphQL 的 ReleaseAsset 没有数据库 id），挑出 `fb_` 开头、索引里没有、创建超过 `ORPHAN_HOURS` 的资产删掉。不是 `fb_` 开头的资产是别人手工放的，不碰。
 
+对账不再单独 list 索引，用的是同一次定时任务里自动清理 list 出来的快照（`evict` 返回的 `files`），每小时省一次全量 KV list。这样做不会误删：快照里还留着刚被自动清理删掉的文件，它们的资产只会被当成已知，这次不删，没删干净的段等下一次对账；快照比列资产早几秒，这期间新传的资产创建时间不到 `ORPHAN_HOURS`，不会被判成孤儿。
+
 对账删错了就是丢数据，所以保护比清理多：
 
 - `SWEEP_ORPHANS` 默认关，线上配置打开，本地 `.dev.vars` 关掉（理由见 `must/invariants.md` 第 16 条）。
