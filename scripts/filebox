@@ -32,6 +32,8 @@
 # 兼容性要求：要能在 macOS 自带的 Bash 3.2、BSD 工具和旧版 curl 上跑。
 # 所以不用关联数组、mapfile、${var,,}、curl 的 --fail-with-body，
 # 也不依赖 python3 或 jq：需要解析的响应都让服务端用 ?format=text 返回纯文本。
+# 变量后面紧跟中文（包括全角标点）时必须写成 ${name}：macOS 的 Bash 3.2 在 UTF-8 下
+# 会把中文的首字节当成变量名的一部分，"$new（" 读成变量 new\xef，在 set -u 下直接报错。
 set -euo pipefail
 
 # Worker 下发脚本时会把这两行替换成站点地址和版本号；仓库里的副本保持原样。
@@ -199,7 +201,7 @@ case "$cmd" in
     if [ "$size" -gt "$part_bytes" ]; then
       # 大文件要传很久，同名文件先查一下，免得传完才被拒绝。
       if [ -z "$overwrite" ] && api "$BASE/api/url?format=text&path=$(q "$dest")" >/dev/null 2>&1; then
-        echo "同名文件已存在：$dest（加 -f 覆盖）" >&2
+        echo "同名文件已存在：${dest}（加 -f 覆盖）" >&2
         exit 1
       fi
       put_parts "$src" "$dest" "$size" "$part_bytes" "$type" "$overwrite"
@@ -223,7 +225,7 @@ case "$cmd" in
 
   whoami)
     if ! api "$BASE/api/whoami?format=text"; then
-      echo "token 不能用。站点是 $BASE，检查 FILEBOX_TOKEN 和 FILEBOX_URL。" >&2
+      echo "token 不能用。站点是 ${BASE}，检查 FILEBOX_TOKEN 和 FILEBOX_URL。" >&2
       exit 1
     fi
     ;;
@@ -265,7 +267,7 @@ case "$cmd" in
     need "${1:-}" "get <远端路径> [保存为]"
     out="${2:-$(basename "$1")}"
     if [ -e "$out" ]; then
-      echo "目标已存在：$out（先移走或指定别的文件名）" >&2
+      echo "目标已存在：${out}（先移走或指定别的文件名）" >&2
       exit 1
     fi
     link=$(api "$BASE/api/url?format=text&path=$(q "$1")")
@@ -274,7 +276,7 @@ case "$cmd" in
     ;;
 
   version)
-    echo "filebox $VERSION（$BASE）"
+    echo "filebox ${VERSION}（${BASE}）"
     ;;
 
   update)
@@ -284,7 +286,7 @@ case "$cmd" in
     fi
     dir=${self%/*}
     if [ ! -w "$dir" ]; then
-      echo "没有权限写 $dir，用 sudo 运行，或者把脚本放到自己能写的目录" >&2
+      echo "没有权限写 ${dir}，用 sudo 运行，或者把脚本放到自己能写的目录" >&2
       exit 1
     fi
     # 先下载到同一目录下的临时文件，检查无误再用 mv 原子替换。不能直接覆盖：
@@ -304,11 +306,11 @@ case "$cmd" in
       exit 1
     fi
     if [ "$(<"$tmp")" = "$(<"$self")" ]; then
-      echo "已经是最新版（$VERSION）：$self"
+      echo "已经是最新版（${VERSION}）：$self"
       exit 0
     fi
     mv -f "$tmp" "$self"
-    echo "已更新：$VERSION → $new（$self）"
+    echo "已更新：$VERSION → ${new}（${self}）"
     exit 0
     ;;
 
