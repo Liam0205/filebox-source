@@ -78,7 +78,7 @@ npx wrangler deploy
 
 `wrangler.jsonc` 被 `.gitignore` 排除，域名、KV 命名空间 id、存储仓库名都只留在本地。
 
-想推送后自动部署，可以在 Cloudflare 面板里把 Worker 连到自己的仓库（Workers Builds）。仓库里没有 `wrangler.jsonc`，所以要把它去掉注释、压成一行，存成构建密钥，再让构建命令先写出这个文件：`printf '%s' "$WRANGLER_JSONC" > wrangler.jsonc && npm run check && node test/evict.test.mjs`，部署命令用 `npx wrangler deploy`。仓库是公开的话，不要改用它自己的 GitHub Actions 部署：部署输出里有域名和绑定的变量，公开仓库的 Actions 日志谁都能看。
+想推送后自动部署，可以在 Cloudflare 面板里把 Worker 连到自己的仓库（Workers Builds）。仓库里没有 `wrangler.jsonc`，所以构建命令要先从存放配置的私有仓库把它读下来，用一个只读的 fine-grained PAT（只授权配置仓库，Contents: Read-only），存成构建密钥 `CONFIG_TOKEN`：`curl -fsSL -H "Authorization: Bearer $CONFIG_TOKEN" -H "Accept: application/vnd.github.raw" "https://api.github.com/repos/<配置仓库>/contents/wrangler.jsonc?ref=main" -o wrangler.jsonc && npm run check && node test/evict.test.mjs`，部署命令用 `npx wrangler deploy`。这样配置只有一份，改了推送配置仓库就行。可观测性的设置要整段写进 `wrangler.jsonc`，在面板上改的会被下一次部署覆盖。仓库是公开的话，不要改用它自己的 GitHub Actions 部署：部署输出里有域名和绑定的变量，公开仓库的 Actions 日志谁都能看。
 
 存储侧需要一个私有仓库，和仓库里一个承载资产的 release，仓库名和 tag 填在 `wrangler.jsonc` 的 `GITHUB_REPO`、`RELEASE_TAG`，两项都没有默认值。不要用公开仓库存文件：公开仓库的 release 谁都能列出和下载，文件列表就公开了。release 要手工建：
 

@@ -120,12 +120,13 @@ npx -y wrangler@4.161.0 deploy
 
 线上的 Worker 在 Cloudflare 面板里连着公开源码仓库（Workers Builds），推送 main 就会构建并部署，大约一分钟。所以**推送就是部署**，推之前要先按本文在本地测完。
 
-- 公开仓库里没有 `wrangler.jsonc`。构建命令先把构建密钥 `WRANGLER_JSONC` 写成这个文件，再跑 `npm run check` 和单元测试，有一步失败就不部署：
-  `printf '%s' "$WRANGLER_JSONC" > wrangler.jsonc && npm run check && node test/evict.test.mjs`
+- 公开仓库里没有 `wrangler.jsonc`。构建命令先用构建密钥 `CONFIG_TOKEN` 从存放线上配置的私有仓库读出这个文件，再跑 `npm run check` 和单元测试，有一步失败就不部署：
+  `curl -fsSL -H "Authorization: Bearer $CONFIG_TOKEN" -H "Accept: application/vnd.github.raw" "https://api.github.com/repos/<配置仓库>/contents/wrangler.jsonc?ref=main" -o wrangler.jsonc && npm run check && node test/evict.test.mjs`
   部署命令是 `npx -y wrangler@4.161.0 deploy`。
-- 密钥里存的是去掉注释、压成一行的配置。带注释的原文转 base64 后有 5 KB，面板保存时报「内部错误」，压缩后不到 1 KB 就能保存。压缩用 macOS 也自带的 perl：
-  `perl -MJSON::PP -0777 -ne 's{^\s*//.*$}{}mg; print JSON::PP->new->utf8->canonical->encode(decode_json($_))' wrangler.jsonc`
-- **改 `wrangler.jsonc` 要同时更新这个密钥**。配置有两份，私有仓库里一份，构建密钥里一份；只改私有仓库的话，下一次推送会用旧配置部署，把改动覆盖掉。
+- 配置只有私有仓库里那一份。改了配置、推送私有仓库后，下一次构建就用新配置；只改配置不改源码时，在面板里重试一次构建。
+- `CONFIG_TOKEN` 是单独的 fine-grained PAT，只授权配置仓库，权限只有 Contents: Read-only，有过期时间。不复用 Worker 运行时的 `GITHUB_TOKEN`：构建环境每次都从 npm 下载并执行 wrangler，环境变量泄露的风险比运行时大；只读的 token 泄露了只能读，可读写的还能删掉存的文件、改掉部署配置。两个分开，过期和吊销也互不影响。token 不对或者过期时，curl 的 `-f` 让构建直接失败，不会拿错误的配置去部署。
+- 最早的做法是把压缩后的配置存进构建密钥，改配置时要手动同步两份，容易漏。带注释的原文转 base64 后约 5 KB，面板保存时还会报「内部错误」。
+- **可观测性要在 `wrangler.jsonc` 里整段写全**（`logs`、`traces`、`issues` 等）。部署时 wrangler 把这一段原样交给 Cloudflare，在面板上改的设置会被下一次部署覆盖；只写 `{ "enabled": true }` 的话，面板上开的跟踪和实时问题都会被关掉。2026-11-15 实际被覆盖过一次。
 - 非生产分支的构建是关着的。打开的话，别的分支和 PR 也会往这个 Worker 上传版本。
 - 构建监视路径排除了 `llmdoc/**`、`.gitignore`、`LICENSE`、`NOTICE`、`README.md`，只改文档的推送不会触发部署。新加只放文档的文件或目录时，要不要也排除掉，在面板里改。
 - 用 GitHub 上公开仓库自己的 Actions 部署不行：`wrangler deploy` 的输出里有路由和绑定的变量，公开仓库的 Actions 日志谁都能看到。Workers Builds 的日志只在面板里。
