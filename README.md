@@ -212,3 +212,7 @@ scripts/
 test/
   evict.test.mjs  挑选待删文件的单元测试（node test/evict.test.mjs）
 ```
+
+## 许可证
+
+[Apache License 2.0](LICENSE)，版权声明见 [NOTICE](NOTICE)。
