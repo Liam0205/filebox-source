@@ -482,6 +482,8 @@ put_parts() {
   n=1
   while [ "$n" -le "$of" ]; do
     echo "第 $n/$of 段" >&2
+    # 从 Finder 右键菜单调用时没有终端，进度只能靠通知。
+    if [ -n "${FILEBOX_NOTIFY:-}" ]; then notify "filebox 上传中" "${dest##*/}：第 $n/$of 段"; fi
     dd if="$src" of="$part" bs=1048576 skip=$(( (n - 1) * mib )) count="$mib" 2>/dev/null
     QUIET=$PROGRESS
     receipt=$(api_retry -T "$part" -H "Expect:" -H "Content-Type: application/octet-stream" \
@@ -717,16 +719,32 @@ case "$cmd" in
     # install-finder 装的快速操作调用它：逐个上传选中的文件，到根目录，同名不覆盖；
     # 链接放进剪贴板，结果用系统通知告诉用户。运行时没有终端，出错也只能靠通知，
     # 所以总是返回 0，免得 Automator 再弹一个看不懂的错误框。
+    # 开始时先发一条通知，大文件每段再发一条（put_parts 看 FILEBOX_NOTIFY），
+    # 不然传大文件时几分钟没有任何动静，看不出是不是还在传。
     links=""
     n=0
     failed=0
     first_err=""
+    total=0
+    if [ "$#" -eq 0 ]; then exit 0; fi
+    for f in "$@"; do
+      if [ -f "$f" ]; then
+        s=$(wc -c < "$f")
+        total=$((total + ${s//[!0-9]/}))
+      fi
+    done
+    if [ "$total" -ge 1048576 ]; then human="$((total / 1048576)) MiB"; else human="$(( (total + 1023) / 1024 )) KiB"; fi
+    if [ "$#" -eq 1 ]; then
+      notify "filebox 上传中" "开始上传 $(basename "$1")（${human}），传完会再通知"
+    else
+      notify "filebox 上传中" "开始上传 $# 个文件（共 ${human}），传完会再通知"
+    fi
     err=$(mktemp)
     for f in "$@"; do
       name=$(basename "$f")
       if [ ! -f "$f" ]; then
         msg="不是普通文件（目录要先打包）"
-      elif link=$("$BASH" "$0" put "$f" 2>"$err"); then
+      elif link=$(FILEBOX_NOTIFY=1 "$BASH" "$0" put "$f" 2>"$err"); then
         links="$links${link##*"$NL"}$NL"
         n=$((n + 1))
         continue

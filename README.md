@@ -128,7 +128,7 @@ token 先读环境变量 `FILEBOX_TOKEN`，没有再读 `filebox login` 存下�
 
 ### Finder 右键上传（macOS）
 
-`filebox install-finder` 在 `~/Library/Services/` 下生成一个 Automator 快速操作。之后在 Finder 里选中一个或多个文件，右键 → 快速操作 → 上传到 filebox，文件会传到根目录，下载链接复制到剪贴板（多个文件一行一个），结果用系统通知显示。同名文件不覆盖，会在通知里报错；选中目录也会报错，要先打包。
+`filebox install-finder` 在 `~/Library/Services/` 下生成一个 Automator 快速操作。之后在 Finder 里选中一个或多个文件，右键 → 快速操作 → 上传到 filebox，文件会传到根目录，下载链接复制到剪贴板（多个文件一行一个），结果用系统通知显示。开始上传时先发一条通知，超过 95 MiB 的文件每传一段再发一条「第 k/N 段」，用来判断是不是还在传。同名文件不覆盖，会在通知里报错；选中目录也会报错，要先打包。
 
 快速操作运行时读不到 shell 里的环境变量，所以要先 `filebox login` 把 token 存进文件；安装时如果文件不存在、而 `FILEBOX_TOKEN` 可用，会自动替你存一份。快速操作调用的不是脚本本身，而是安装时复制到 `~/Library/Application Support/filebox/filebox` 的副本：脚本放在「文稿」「桌面」「下载」这类受隐私保护的目录里（或者经软链接指到那里）时，快速操作读不了它，会报 `Operation not permitted`。`filebox update` 会顺带更新这份副本，脚本挪了位置也不用重装。`uninstall-finder` 删掉快速操作和副本。
 
