@@ -571,6 +571,8 @@ async function renderFiles(view) {
         " ",
         el("button", { class: "ghost", onclick: function () { toggleKeep(f, view); } }, f.keep ? "取消长期" : "设为长期"),
         " ",
+        el("button", { class: "ghost", onclick: function () { moveFile(f, view); } }, "重命名"),
+        " ",
         el("button", { class: "danger", onclick: function () { removeFile(f, view); } }, "删除"))));
   }
 
@@ -734,6 +736,18 @@ async function newFolder(view) {
   if (!name) return;
   try {
     await jpost("/api/folder", { path: joinPath(curDir, name.trim()) });
+    renderFiles(view);
+  } catch (e) { say(e.message, "err"); }
+}
+
+// 改的是完整路径：只改文件名就是重命名，改了目录部分就是移动。
+// 以 / 结尾、或者填一个已有的目录，就移进那个目录，名字不变。
+async function moveFile(f, view) {
+  const to = prompt("新路径（改目录部分就是移动；填已有目录或以 / 结尾，就移进那个目录）", f.path);
+  if (!to || to.trim() === f.path) return;
+  try {
+    const r = await api("/api/move?from=" + encodeURIComponent(f.path) + "&to=" + encodeURIComponent(to.trim()), { method: "POST" });
+    say("已移动到 " + r.file.path + "，下载地址变了，旧链接不能再用");
     renderFiles(view);
   } catch (e) { say(e.message, "err"); }
 }

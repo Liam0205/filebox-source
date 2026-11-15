@@ -18,6 +18,7 @@
 #   filebox url album/2026.jpg
 #   filebox mkdir album/2026
 #   filebox rm album/2026.jpg
+#   filebox mv album/2026.jpg album/新年.jpg  # 重命名；目标是目录或以 / 结尾时移进去
 #   filebox rmdir album/2026                 # 只删空目录
 #   filebox keep album/2026.jpg              # 设为长期，不参与自动清理
 #   filebox unkeep album/2026.jpg            # 取消长期
@@ -598,6 +599,11 @@ case "$cmd" in
     need "${1:-}" "rm <远端路径>"
     api -X DELETE "$BASE/api/file?path=$(q "$1")" >/dev/null
     echo "已删除 $1"
+    ;;
+
+  mv)
+    need "${2:-}" "mv <远端路径> <新路径或目录/>"
+    api -X POST "$BASE/api/move?format=text&from=$(q "$1")&to=$(q "$2")"
     ;;
 
   rmdir)

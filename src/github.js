@@ -86,6 +86,21 @@ export async function uploadAsset(cfg, { name, label, body, contentType, content
   return res.json();
 }
 
+// label 最多 120 个字符，GitHub 对更长的会报错。路径太长时留结尾那段，文件名在里面。
+export function assetLabel(label) {
+  return label.length <= 120 ? label : label.slice(-120);
+}
+
+// 改资产的 label，给重命名用。资产名（fb_…）不动。
+export async function setAssetLabel(cfg, assetId, label) {
+  const res = await call(cfg, `${API}/repos/${repoOf(cfg)}/releases/assets/${assetId}`, {
+    method: "PATCH",
+    headers: headers(cfg, { "content-type": "application/json" }),
+    body: JSON.stringify({ label: assetLabel(label) }),
+  });
+  if (!res.ok) throw new Error(`改 label 失败：HTTP ${res.status}`);
+}
+
 export async function deleteAsset(cfg, assetId) {
   const res = await call(cfg, `${API}/repos/${repoOf(cfg)}/releases/assets/${assetId}`, {
     method: "DELETE",

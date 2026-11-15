@@ -7,6 +7,7 @@
 //   POST   /api/upload/part?path=&id=&n=&of=&size=   上传第 n 段，返回签名回执
 //   POST   /api/upload/complete?path=... 交回全部回执（一行一张），写索引
 //   DELETE /api/file?path=...            删除文件
+//   POST   /api/move?from=...&to=...     重命名或移动文件（to 是目录时移进去）
 //   POST   /api/folder                   新建目录 { "path": "a/b" }
 //   DELETE /api/folder?path=...          删除空目录
 //   POST   /api/keep?path=...            设为长期（不参与自动清理）
@@ -14,7 +15,7 @@
 //
 // 管理员可以用 ?user= 操作别人的文件；普通用户只能操作自己的。
 //
-// whoami、files、url、upload 系列、keep 接受 ?format=text，返回纯文本，给命令行用：
+// whoami、files、url、upload 系列、keep、move 接受 ?format=text，返回纯文本，给命令行用：
 // 客户端要能在 macOS 自带的 Bash 3.2 上跑，不能指望有 JSON 解析工具。
 
 import { json, methodNotAllowed, readJson, readText, text } from "./http.js";
@@ -27,11 +28,13 @@ import {
   listDir,
 } from "./names.js";
 import { randomHex, readReceipt, sha256Hex, signReceipt } from "./auth.js";
-import { deleteAssets, uploadAsset } from "./github.js";
+import { assetLabel, deleteAssets, setAssetLabel, uploadAsset } from "./github.js";
 import {
   assetIdsOf,
   deleteDirRecord,
+  deleteFileRecord,
   dirHasChildren,
+  getDir,
   getFile,
   keyFits,
   listAllFiles,
@@ -181,6 +184,11 @@ export async function handleFilesApi(request, env, cfg, route, url, actor) {
     return remove(request, env, cfg, url, actor);
   }
 
+  if (route === "move") {
+    if (request.method !== "POST") return methodNotAllowed();
+    return move(env, cfg, url, actor);
+  }
+
   if (route === "keep") {
     if (request.method === "POST") return setKeep(env, cfg, url, actor, true);
     if (request.method === "DELETE") return setKeep(env, cfg, url, actor, false);
@@ -229,7 +237,7 @@ async function putAsset(env, cfg, request, user, label, contentType, length) {
   try {
     const asset = await uploadAsset(cfg, {
       name: `fb_${user}_${randomHex(12)}`,
-      label: label.length <= 120 ? label : label.slice(-120),
+      label: assetLabel(label),
       body: request.body,
       contentType,
       contentLength: length,
@@ -471,6 +479,56 @@ async function remove(request, env, cfg, url, actor) {
     await caches.default.delete(cacheRequest(cfg, t.user, path, rec.assetId)).catch(() => {});
   }
   return json({ deleted: path });
+}
+
+// 重命名和移动只改索引：写新键、删旧键，资产不动，所以下载地址里的 ?v= 不变，路径变了。
+// 先写新键再删旧键。中间失败时两个键指向同一组资产，字节不会丢；反过来先删再写，
+// 失败时就只剩没有索引的资产，过几个小时会被对账任务当成孤儿删掉。
+// to 以 / 结尾，或者是已有的目录（显式记录，或者下面有文件），就移进这个目录，名字不变。
+// 目标位置已有文件时拒绝，不做覆盖。
+async function move(env, cfg, url, actor) {
+  const from = url.searchParams.get("from") || "";
+  let to = url.searchParams.get("to") || "";
+  if (!isPathSegments(from, cfg)) return json({ error: "原路径不合法" }, 400);
+
+  const t = await targetUser(url, env, actor);
+  if (t.error) return json({ error: t.error }, t.status);
+
+  if (to.endsWith("/")) {
+    const dir = to.replace(/\/+$/, "");
+    to = dir ? `${dir}/${basename(from)}` : basename(from);
+  } else if (isPathSegments(to, cfg)) {
+    if ((await getDir(env, t.user, to)) || (await dirHasChildren(env, t.user, to))) {
+      to = `${to}/${basename(from)}`;
+    }
+  }
+  const bad = checkPath(cfg, t.user, to);
+  if (bad) return bad;
+  if (to === from) return json({ error: "新路径和原路径相同" }, 400);
+
+  const rec = await getFile(env, t.user, from);
+  if (!rec) return json({ error: "没有这个文件" }, 404);
+  if (await getFile(env, t.user, to)) return json({ error: `目标位置已有文件：${to}` }, 409);
+
+  await putFile(env, t.user, { ...rec, path: to });
+  await deleteFileRecord(env, t.user, from);
+  if (cfg.cacheEnabled) {
+    await caches.default.delete(cacheRequest(cfg, t.user, from, rec.assetId)).catch(() => {});
+  }
+
+  // label 只是给人看、以后重建索引用的，改不成不影响移动结果，记一笔日志就行。
+  const ids = assetIdsOf(rec);
+  try {
+    for (let i = 0; i < ids.length; i += 1) {
+      await setAssetLabel(cfg, ids[i], ids.length > 1 ? `${to} (${i + 1}/${ids.length})` : to);
+    }
+  } catch (err) {
+    console.log(JSON.stringify({ labelError: err.message, to }));
+  }
+
+  const abs = `${url.origin}${fileUrl(cfg, t.user, to, rec.assetId)}`;
+  if (wantsText(url)) return text(`已移动到 ${to}：${abs}`);
+  return json({ from, file: publicFile(cfg, t.user, { ...rec, path: to }) });
 }
 
 // 长期文件不参与自动清理。数量有上限：每人 maxKeepPerUser 个文件，

@@ -19,7 +19,7 @@
 ## 功能
 
 - `/admin` 管理页：账号口令登录、文件管理与上传、token 生成/吊销、用户管理（仅管理员）。
-- 文件管理：任意深的虚拟目录、拖拽上传、下载、复制链接、删除文件、新建/删除空目录。
+- 文件管理：任意深的虚拟目录、拖拽上传、下载、复制链接、重命名和移动文件、删除文件、新建/删除空目录。
 - 每个用户只能看到和操作自己名下的文件；管理员可以代管。
 - 下载公开、无需登录。上传需要账号会话或 `Authorization: Bearer <token>`。
 - 单文件最大 2 GiB。超过 95 MiB 的文件由命令行和网页自动分段上传，下载地址仍然只有一个，支持 Range。
@@ -117,6 +117,7 @@ filebox url album/2026.jpg               # 打印可直接分享的下载地址
 filebox get album/2026.jpg ./out.jpg     # 本地已有同名文件时拒绝
 filebox mkdir album/2027
 filebox rm album/2026.jpg
+filebox mv album/2026.jpg album/新年.jpg # 重命名；目标是已有目录或以 / 结尾时移进去，mv a.jpg / 移回根目录
 filebox rmdir album/2027                 # 只删空目录
 filebox keep album/2026.jpg              # 设为长期，不参与自动清理；unkeep 取消
 filebox update                           # 从站点下载新版，替换这个脚本自己
@@ -133,6 +134,8 @@ token 先读环境变量 `FILEBOX_TOKEN`，没有再读 `filebox login` 存下�
 快速操作运行时读不到 shell 里的环境变量，所以要先 `filebox login` 把 token 存进文件；安装时如果文件不存在、而 `FILEBOX_TOKEN` 可用，会自动替你存一份。快速操作调用的不是脚本本身，而是安装时复制到 `~/Library/Application Support/filebox/filebox` 的副本：脚本放在「文稿」「桌面」「下载」这类受隐私保护的目录里（或者经软链接指到那里）时，快速操作读不了它，会报 `Operation not permitted`。`filebox update` 会顺带更新这份副本，脚本挪了位置也不用重装。`uninstall-finder` 删掉快速操作和副本。
 
 `ls` 的第一行是整个账号的用量，例如 `alice：12 个文件，占用名额 20/300，长期 3/20 个`；下面先列子目录（`dir` 开头），再列文件，长期文件标着 `keep`。路径都是完整路径，可以直接拿去 `get`、`rm`。
+
+`mv` 只改索引，不重新上传，大文件也是一瞬间完成。下载地址的路径会变，旧链接直接 404，`?v=` 后面的版本号不变；长期标记和创建时间保留。目标位置已有文件时拒绝，要覆盖先 `rm`。只能移动单个文件，不能移动目录。
 
 超过 95 MiB 的文件，`put` 会自动用 `dd` 切段，逐段上传，每段打印一行进度，最后提交。上传中断的话，已经传上去的段会在 6 小时后被对账任务删掉，重新 `put` 一次即可。`get` 不用管分段，站点会拼成一个文件返回。
 
@@ -176,6 +179,8 @@ POST   /api/upload/part?path=…&id=…&n=…&of=…&size=…[&format=text]
 POST   /api/upload/complete?path=…[&overwrite=1][&format=text]
                                          请求体是全部回执，一行一张；可带 X-File-Type 头
 DELETE /api/file?path=…
+POST   /api/move?from=…&to=…[&format=text]
+                                         重命名或移动；to 以 / 结尾或是已有目录时移进去，目标已有文件返回 409
 POST   /api/folder                       {"path": "a/b"}，或者把 path 放在查询串里
 DELETE /api/folder?path=…                只删空目录
 POST   /api/keep?path=…[&format=text]    设为长期；超过上限返回 409
