@@ -9,7 +9,9 @@
 #   filebox put ./photo.jpg                  # 上传到根目录，成功后打印下载地址
 #   filebox put ./photo.jpg album/2026.jpg   # 上传到指定路径（同名默认拒绝）
 #   filebox put -f ./photo.jpg album/2026.jpg  # 覆盖同名文件
-#   filebox ls
+#   filebox ls                               # 列出根目录下一层
+#   filebox ls album                         # 列出 album 下一层
+#   filebox ls -r [album]                    # 列出下面的全部文件
 #   filebox get album/2026.jpg [保存为]
 #   filebox url album/2026.jpg
 #   filebox mkdir album/2026
@@ -211,7 +213,12 @@ case "$cmd" in
     ;;
 
   ls)
-    api "$BASE/api/files?format=text"
+    recursive=""
+    if [ "${1:-}" = "-r" ]; then recursive="&recursive=1"; shift; fi
+    # q 遇到空串会输出一个孤立的 %，所以没给目录时不带 dir 参数。
+    dir=""
+    if [ -n "${1:-}" ]; then dir="&dir=$(q "$1")"; fi
+    api "$BASE/api/files?format=text$dir$recursive"
     ;;
 
   whoami)

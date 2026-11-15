@@ -110,8 +110,8 @@ export FILEBOX_TOKEN=fb_…          # 在 /admin 里生成，只显示一次
 
 filebox whoami                          # 检查 token：打印用户名、角色和 token 的名字
 filebox put ./photo.jpg album/2026.jpg   # 成功后打印下载地址；同名默认拒绝，-f 覆盖
-filebox ls
-filebox url album/2026.jpg               # 打印可直接分享的下载地址
+filebox ls                               # 列出根目录下一层；ls album 列出 album 下一层
+filebox ls -r                            # 列出全部文件；ls -r album 只列 album 下面的filebox url album/2026.jpg               # 打印可直接分享的下载地址
 filebox get album/2026.jpg ./out.jpg     # 本地已有同名文件时拒绝
 filebox mkdir album/2027
 filebox rm album/2026.jpg
@@ -121,7 +121,7 @@ filebox update                           # 从站点下载新版，替换这个�
 filebox version
 ```
 
-`ls` 的第一行是用量，例如 `alice：12 个文件，占用名额 20/300，长期 3/20 个`；长期文件在列表里标着 `keep`。
+`ls` 的第一行是整个账号的用量，例如 `alice：12 个文件，占用名额 20/300，长期 3/20 个`；下面先列子目录（`dir` 开头），再列文件，长期文件标着 `keep`。路径都是完整路径，可以直接拿去 `get`、`rm`。
 
 超过 95 MiB 的文件，`put` 会自动用 `dd` 切段，逐段上传，每段打印一行进度，最后提交。上传中断的话，已经传上去的段会在 6 小时后被对账任务删掉，重新 `put` 一次即可。`get` 不用管分段，站点会拼成一个文件返回。
 

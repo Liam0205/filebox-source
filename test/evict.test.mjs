@@ -1,8 +1,9 @@
-// 自动清理、孤儿对账、分段下载区间换算的单元测试：node test/evict.test.mjs
+// 自动清理、孤儿对账、分段下载区间换算、目录列表的单元测试：node test/evict.test.mjs
 import assert from "node:assert/strict";
 import { findOrphans, orphanDoubt, planEviction } from "../src/evict.js";
 import { parseRange, partSlices } from "../src/download.js";
 import { resolveConfig, MAX_PARTS } from "../src/config.js";
+import { listDir } from "../src/names.js";
 
 const cfg = { maxAssetsPerUser: 3, evictHigh: 6, evictLow: 4 };
 // parts 是这个文件占几个资产（分段数）。
@@ -145,4 +146,23 @@ assert.equal(small.maxFileBytes, MAX_PARTS * 1024 * 1024);
 assert.equal(resolveConfig({ PART_BYTES: "3000000" }).partBytes, 2 * 1024 * 1024);
 assert.equal(resolveConfig({ PART_BYTES: String(500 * 1024 * 1024) }).partBytes, 95 * 1024 * 1024);
 
-console.log("evict / orphans / ranges / config: all cases passed");
+// ── 目录列表 ──
+
+const tree = [{ path: "a.txt" }, { path: "safe/b.bin" }, { path: "safe/x/y/c.bin" }, { path: "docs/d.pdf" }];
+const lsNames = (r) => ({ exists: r.exists, dirs: r.dirs, files: names(r.files) });
+// 根目录：显式的空目录 empty 和由文件路径推出的 safe、docs 都列出来，深层文件不出现。
+assert.deepEqual(lsNames(listDir(tree, ["empty"], "")), {
+  exists: true,
+  dirs: ["docs", "empty", "safe"],
+  files: ["a.txt"],
+});
+// 子目录：只列下一层，safe/x 由 safe/x/y/c.bin 推出。
+assert.deepEqual(lsNames(listDir(tree, [], "safe")), { exists: true, dirs: ["safe/x"], files: ["safe/b.bin"] });
+assert.deepEqual(lsNames(listDir(tree, [], "safe/x")), { exists: true, dirs: ["safe/x/y"], files: [] });
+assert.deepEqual(lsNames(listDir(tree, ["empty"], "empty")), { exists: true, dirs: [], files: [] });
+// 不存在的目录；文件名和目录名前缀相同（saf、safe/b.bin）不算目录。
+assert.equal(listDir(tree, [], "nope").exists, false);
+assert.equal(listDir(tree, [], "saf").exists, false);
+assert.equal(listDir(tree, [], "safe/b.bin").exists, false);
+
+console.log("evict / orphans / ranges / config / listDir: all cases passed");

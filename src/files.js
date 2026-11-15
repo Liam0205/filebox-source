@@ -23,6 +23,8 @@ import {
   encodePath,
   extAllowed,
   isPathSegments,
+  isUnder,
+  listDir,
 } from "./names.js";
 import { randomHex, readReceipt, sha256Hex, signReceipt } from "./auth.js";
 import { deleteAssets, uploadAsset } from "./github.js";
@@ -107,12 +109,22 @@ export async function handleFilesApi(request, env, cfg, route, url, actor) {
       maxKeep: cfg.maxKeepPerUser,
     };
     if (wantsText(url)) {
+      // 命令行的 ls：?dir= 只列这个目录下一层（默认根目录），加 recursive=1 列出它下面的
+      // 全部文件和显式目录。第一行的用量总是全账号的，路径总是完整路径，方便直接拿去 get/rm。
+      const dir = (url.searchParams.get("dir") || "").replace(/^\/+|\/+$/g, "");
+      if (dir && !isPathSegments(dir, cfg)) return json({ error: "目录路径不合法" }, 400);
+      const level = listDir(files, dirs, dir);
+      if (!level.exists) return json({ error: `没有这个目录：${dir}` }, 404);
+      const shown =
+        url.searchParams.get("recursive") === "1"
+          ? { dirs: dirs.filter((d) => isUnder(d, dir)), files: files.filter((f) => isUnder(f.path, dir)) }
+          : level;
       // 路径不含控制字符（见 isPathSegments），一行一项不会串行。
       const lines = [
         `${t.user}：${limits.files} 个文件，占用名额 ${limits.assets}/${limits.maxAssets}，长期 ${limits.keep}/${limits.maxKeep} 个`,
       ];
-      for (const d of dirs) lines.push(`  dir                          ${d}`);
-      for (const f of files) {
+      for (const d of shown.dirs) lines.push(`  dir                          ${d}`);
+      for (const f of shown.files) {
         const mark = f.keep ? "keep" : "    ";
         lines.push(`  ${String(f.size).padStart(10)}  ${String(f.created).slice(0, 10)}  ${mark}  ${f.path}`);
       }

@@ -43,6 +43,25 @@ export function isUnder(path, dir) {
   return path.startsWith(`${dir}/`);
 }
 
+// 列出 dir 下一层的子目录和文件（dir 为空表示根目录），规则和管理页的 fetchEntries 一样：
+// 子目录包括显式目录和文件路径上推出来的父目录。exists 为 false 表示既没有这个
+// 显式目录，也没有文件在它下面。
+export function listDir(files, dirs, dir) {
+  const all = new Set(dirs);
+  for (const f of files) {
+    let d = dirname(f.path);
+    while (d) {
+      all.add(d);
+      d = dirname(d);
+    }
+  }
+  return {
+    exists: !dir || all.has(dir),
+    dirs: [...all].filter((d) => dirname(d) === dir).sort(),
+    files: files.filter((f) => dirname(f.path) === dir),
+  };
+}
+
 // 路径 → URL 片段，逐段编码，斜杠保持为分隔符。
 export function encodePath(path) {
   return path.split("/").map(encodeURIComponent).join("/");
