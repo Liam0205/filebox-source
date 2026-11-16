@@ -5,6 +5,7 @@
 //   /f/<用户>/<路径>           公开下载，不需要登录
 //   /api/*                    文件管理 API，需要 token 或会话
 //   /filebox                  命令行客户端（scripts/filebox，填好站点地址）
+//   /manifest.webmanifest     「添加到主屏幕」用的 manifest，图标在 /icons/
 //
 // 字节存在私有仓库的 release 资产里，路径和归属存在 KV。选择代理而不是
 // 302：私有资产的下载地址是短时效签名 URL，且域名在部分网络下不可用。
@@ -17,6 +18,7 @@ import { handleAdmin } from "./admin.js";
 import { evict, sweepOrphans } from "./evict.js";
 import { esc, html, json, notFound, text } from "./http.js";
 import { sha256Hex } from "./auth.js";
+import { appIcon, appManifest } from "./app.js";
 // wrangler.jsonc 的 rules 把这个文件按纯文本打包进来。
 import CLI_SCRIPT from "../scripts/filebox";
 
@@ -86,6 +88,14 @@ async function dispatch(request, env, ctx, cfg, url) {
   if (path === "/") return landing(cfg, url);
 
   if (path === "/filebox") return cliScript(request, cfg, url);
+
+  if (path === "/manifest.webmanifest") return appManifest(cfg);
+  if (path.startsWith("/icons/")) {
+    const m = /^\/icons\/([0-9]+)\.png$/.exec(path);
+    const res = m ? appIcon(m[1]) : null;
+    if (res) return res;
+    return notFound(cfg);
+  }
 
   if (path === "/admin" || path.startsWith("/admin/")) {
     return handleAdmin(request, env, cfg, path);

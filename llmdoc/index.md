@@ -24,7 +24,7 @@
 
 ## guides/
 
-- `llmdoc/guides/deploy-and-test.md`：本地开发、建管理员、部署（推送 main 后自动部署及其构建密钥）、线上冒烟测试；怎样用 Bash 3.2 测命令行脚本，怎样在本地测自动清理、分段上传和孤儿对账，怎样在 Linux 上测 Finder 右键菜单；测试资源的清理纪律。
+- `llmdoc/guides/deploy-and-test.md`：本地开发、建管理员、部署（推送 main 后自动部署及其构建密钥）、线上冒烟测试；怎样用 Bash 3.2 测命令行脚本，怎样在本地测自动清理、分段上传和孤儿对账，怎样在 Linux 上测 Finder 右键菜单，怎样截图检查管理页的手机布局；测试资源的清理纪律。
 
 ## memory/
 

@@ -103,6 +103,14 @@ Linux 上测不到的两件事，在 Mac 上踩过：
 
 2026-11-15 在 macOS 15.7.3 上验证过：`install-finder` 之后不用另存、不用重启 Finder，菜单直接出现；脚本真身在「文稿」里时能正常运行，选中「文稿」里的文件也能上传。
 
+## 测管理页的手机布局
+
+宽度不超过 640px 时，管理页的表格改成一行一张卡片（`src/admin.js` 里的 `@media(max-width:640px)`）；触屏设备（`hover:none` 且 `pointer:coarse`）隐藏拖放区。改了管理页的表格或按钮后，用 Playwright 在 393×852、`isMobile`、`hasTouch` 下截文件、token、用户三个标签页，确认 `document.documentElement.scrollWidth - innerWidth` 是 0，也就是没有横向滚动。
+
+- 截图用 `page.screenshot()`，不要加 `fullPage: true`。整页截图会临时把视口拉到整页高度，触屏的媒体查询随之不再匹配，截出来的图里会多出拖放区，和真机看到的不一样。
+- 本地 KV 里的测试账号用 `setup.mjs` 建，测试文件可以只写索引（`wrangler kv key put --local`，带 metadata），不用真传到 GitHub。测完删掉。
+- 「添加到主屏幕」只能在真机上验证：iPhone 的 Safari 用 `apple-touch-icon`（`/icons/180.png`），安卓的 Chrome 读 `/manifest.webmanifest`。
+
 ## 部署
 
 `wrangler.jsonc` 不进仓库。第一次部署先 `cp wrangler.example.jsonc wrangler.jsonc`，填上域名、KV 命名空间 id、存储仓库和 release tag。线上用的那份放在单独的私有仓库里维护，源码目录里的 `wrangler.jsonc` 是指向它的软链接。wrangler 按软链接所在的目录解析 `main`，所以部署照常在源码目录运行。

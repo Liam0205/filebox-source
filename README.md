@@ -18,7 +18,7 @@
 
 ## 功能
 
-- `/admin` 管理页：账号口令登录、文件管理与上传、token 生成/吊销、用户管理（仅管理员）。
+- `/admin` 管理页：账号口令登录、文件管理与上传、token 生成/吊销、用户管理（仅管理员）。手机上文件列表按一行一张卡片显示，可以用浏览器的「添加到主屏幕」装成一个独立打开的图标。
 - 文件管理：任意深的虚拟目录、拖拽上传、下载、复制链接、重命名和移动文件、删除文件、新建/删除空目录。
 - 每个用户只能看到和操作自己名下的文件；管理员可以代管。
 - 下载公开、无需登录。上传需要账号会话或 `Authorization: Bearer <token>`。
@@ -204,6 +204,8 @@ DELETE /api/keep?path=…[&format=text]    取消长期
 
 命令行脚本：`GET|HEAD /filebox`，不需要登录。
 
+「添加到主屏幕」用的 manifest 和图标：`GET /manifest.webmanifest`、`GET /icons/180.png|192.png|512.png`，不需要登录。
+
 ## 安全设计
 
 - 口令用 PBKDF2-SHA256，迭代次数可配（`PASSWORD_ITERATIONS`，默认 100000），盐随机 16 字节。2026-11-14 在线上实测，登录耗时约 0.8–0.9 秒，没有触发免费计划的 CPU 限制。
@@ -240,6 +242,7 @@ DELETE /api/keep?path=…[&format=text]    取消长期
 ```
 src/
   worker.js    路由与首页
+  app.js       「添加到主屏幕」的 manifest 和内嵌图标（源文件 assets/icon.svg）
   admin.js     管理页（单页应用）与账号/token 接口
   files.js     文件管理 API
   download.js  公开下载、Range、缓存、分段拼接

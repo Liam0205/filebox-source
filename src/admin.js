@@ -336,6 +336,12 @@ function renderAdmin(cfg, session) {
 <html lang="zh-CN"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex"><title>${esc(cfg.siteName)} · 管理</title>
+<link rel="manifest" href="${esc(cfg.basePath || "")}/manifest.webmanifest">
+<link rel="apple-touch-icon" href="${esc(cfg.basePath || "")}/icons/180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="${esc(cfg.siteName)}">
+<meta name="theme-color" content="#fbfbfa" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#16181c" media="(prefers-color-scheme: dark)">
 <style>
  :root{--bg:#fbfbfa;--fg:#1f2328;--muted:#606a75;--line:#e3e5e8;--card:#fff;--accent:#2f6feb;--danger:#c62828}
  @media(prefers-color-scheme:dark){:root{--bg:#16181c;--fg:#e6e8eb;--muted:#9aa4b0;--line:#2c3138;--card:#1d2025;--accent:#4d8dfa;--danger:#ef5350}}
@@ -383,6 +389,34 @@ function renderAdmin(cfg, session) {
  .up{font-size:12px;color:var(--muted);margin-top:6px;white-space:pre-wrap}
  progress{width:100%;height:8px;margin-top:6px;accent-color:var(--accent)}
  .hide{display:none}
+ /* 触屏设备拖不了文件，拖放区只剩一句用不上的提示。 */
+ @media(hover:none) and (pointer:coarse){.drop{display:none}}
+ /* 手机竖屏：表格改成一行一张卡片，名称占满一行，大小和日期跟在下面，
+    按钮换到第三行并允许折行，不再横向溢出。 */
+ @media(max-width:640px){
+  body{padding:16px 16px 56px}
+  .sub{margin-bottom:12px}
+  nav{margin-top:12px;overflow-x:auto}
+  nav button{white-space:nowrap}
+  /* iOS 在输入框字号小于 16px 时聚焦会自动放大页面。 */
+  input,select{font-size:16px}
+  .row>input{min-width:0;flex-basis:100%}
+  table,tbody,tr,td{display:block;width:100%}
+  thead{display:none}
+  tr{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 12px;
+   padding:10px 0;border-bottom:1px solid var(--line)}
+  td{width:auto;padding:0;border:0}
+  td:empty{display:none}
+  tr>td:first-child{flex:1 0 100%;font-size:15px;word-break:break-all}
+  td.actions{flex:1 0 100%;display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;
+   white-space:normal;text-align:left}
+  td.actions button{padding:6px 11px;font-size:14px}
+  /* 目录行只有一个「删除」，和名称放在同一行。 */
+  tr.dir{align-items:center}
+  tr.dir>td:first-child{flex:1 1 auto;width:auto}
+  tr.dir>td.muted{display:none}
+  tr.dir>td.actions{flex:0 0 auto;margin-top:0}
+ }
 </style></head><body><main>
 <h1>${esc(cfg.siteName)}</h1>
 <p class="sub">文件箱管理</p>
@@ -551,7 +585,7 @@ async function renderFiles(view) {
 
   const rows = [];
   for (const d of entries.dirs) {
-    rows.push(el("tr", {},
+    rows.push(el("tr", { class: "dir" },
       el("td", { class: "name", onclick: function () { curDir = d; renderFiles(view); } }, "📁 " + baseOf(d)),
       el("td", { class: "muted" }, "目录"),
       el("td", { class: "muted" }, ""),
