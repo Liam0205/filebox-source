@@ -18,9 +18,11 @@ function headers(cfg, extra = {}) {
   return h;
 }
 
-async function call(cfg, url, init = {}) {
+// 超时只算到收到响应头。timeoutMs 为 0 时不设超时，给上传用。
+async function call(cfg, url, init = {}, timeoutMs = cfg.apiTimeoutMs) {
+  if (!timeoutMs) return fetch(url, init);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), cfg.apiTimeoutMs);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, { ...init, signal: controller.signal });
   } finally {
@@ -68,6 +70,9 @@ export async function uploadAsset(cfg, { name, label, body, contentType, content
   delete h.accept;
   if (contentLength) h["content-length"] = String(contentLength);
 
+  // 不设超时：请求体是客户端的流，GitHub 收完才返回响应头，超时会把整段上传
+  // 算进去。一段 95 MiB 在 20 秒内传完要 5 MB/s，手机网络常常达不到。
+  // 客户端断开时请求体出错，这个请求会跟着失败，不会一直挂着。
   const res = await call(cfg, url, {
     method: "POST",
     headers: h,
@@ -75,7 +80,7 @@ export async function uploadAsset(cfg, { name, label, body, contentType, content
     // 流式请求体在 Workers 里需要显式声明。
     duplex: "half",
     redirect: "follow",
-  });
+  }, 0);
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");

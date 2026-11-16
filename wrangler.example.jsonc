@@ -77,6 +77,7 @@
     "VERSIONED_TTL": "31536000",
     "CACHE_ENABLED": "true",
 
+    // 调 GitHub 时等响应头的时长。上传不受它限制，见 src/github.js 的 uploadAsset。
     "API_TIMEOUT_MS": "20000"
   }
 
