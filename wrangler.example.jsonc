@@ -34,6 +34,12 @@
     { "binding": "USERS", "id": "<KV 命名空间 id>" }
   ],
 
+  // 可选。每次上传和下载写一个数据点，用来长期统计速率（Workers Logs 只存 3 天）。
+  // 数据集在第一次写入时自动创建，不用的话删掉这一段。
+  "analytics_engine_datasets": [
+    { "binding": "XFER", "dataset": "filebox_xfer" }
+  ],
+
   "vars": {
     "BASE_PATH": "",
 

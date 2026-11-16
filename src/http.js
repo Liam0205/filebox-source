@@ -40,16 +40,27 @@ export function notFound(cfg) {
 // Workers 里 Date.now() 只在 I/O 之后前进，t0 和结束都紧挨着 I/O，误差可以不计。
 // 出错时不知道实际传了多少，记的是本该传的长度（size），不算速率。
 // 下载带 wait：开始送出字节之前花的时间（查索引、连 GitHub），速率按 ms - wait 算。
+// fields.ds 是 Analytics Engine 的绑定（env.XFER），有就再写一个数据点，留着做长期统计
+// （Workers Logs 只存 3 天）。字段顺序见 llmdoc/architecture/storage-and-auth.md 的「传输日志」。
 export function logTransfer(fields, bytes, t0, err) {
+  const { ds, ...rest } = fields;
   const ms = Date.now() - t0;
-  if (err) {
-    const error = String(err && err.message ? err.message : err).slice(0, 200);
-    console.log(JSON.stringify({ ...fields, size: bytes, ms, error }));
-    return;
+  const wait = rest.wait || 0;
+  const span = ms - wait;
+  const error = err ? String(err && err.message ? err.message : err).slice(0, 200) : "";
+  const MBps = !err && span > 0 ? Math.round((bytes / 1e6 / (span / 1000)) * 100) / 100 : null;
+  if (err) console.log(JSON.stringify({ ...rest, size: bytes, ms, error }));
+  else console.log(JSON.stringify({ ...rest, bytes, ms, MBps }));
+  if (!ds) return;
+  try {
+    ds.writeDataPoint({
+      indexes: [rest.user || ""],
+      blobs: [rest.xfer, rest.user || "", rest.path || "", rest.cache || "", rest.colo || "", error],
+      doubles: [bytes, ms, wait, MBps || 0, err ? 0 : 1, rest.status || 0, rest.parts || 0],
+    });
+  } catch (e) {
+    console.log(JSON.stringify({ xferStatsError: String(e && e.message ? e.message : e).slice(0, 200) }));
   }
-  const span = ms - (fields.wait || 0);
-  const MBps = span > 0 ? Math.round((bytes / 1e6 / (span / 1000)) * 100) / 100 : null;
-  console.log(JSON.stringify({ ...fields, bytes, ms, MBps }));
 }
 
 // JSON 请求体上限。账号和目录接口的正文都很小，超过就拒绝，

@@ -236,7 +236,7 @@ function bodyLength(request) {
 async function putAsset(env, cfg, request, user, label, contentType, length) {
   // GitHub 收完整个请求体才返回，所以这段耗时就是这一次（或这一段）的上传时间。
   const t0 = Date.now();
-  const log = { xfer: "up", user, path: label, colo: request.cf?.colo };
+  const log = { xfer: "up", user, path: label, colo: request.cf?.colo, ds: env.XFER };
   try {
     const asset = await uploadAsset(cfg, {
       name: `fb_${user}_${randomHex(12)}`,

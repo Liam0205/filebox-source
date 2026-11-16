@@ -162,6 +162,33 @@ GitHub release 只当字节仓库用。下载和删除都用资产 id 走仓库�
   - CPU 用量没有因为单文件改走 `FixedLengthStream` 而变大，这几次是 2–12 ms。
 - 缓存命中的小文件耗时只有几毫秒，算出来是几百 MB/s，没有意义。
 
+### 长期统计
+
+Workers Logs 在免费计划下只存 3 天。绑定了 Analytics Engine 数据集（`wrangler.jsonc` 的 `analytics_engine_datasets`，绑定名 `XFER`）时，`logTransfer` 每次再写一个数据点，保留 3 个月。没绑定时只打日志。数据集在第一次写入时自动创建，面板里不用开通。写入出错只记一行 `xferStatsError`，不影响传输。
+
+| 列 | 内容 |
+| - | - |
+| `index1` | 用户 |
+| `blob1`–`blob6` | `xfer`（up / down）、用户、路径、`cache`、`colo`、错误信息（成功时为空） |
+| `double1`–`double7` | 字节数（出错时是本该传的长度）、`ms`、`wait`、`MBps`（出错时为 0）、成功为 1 出错为 0、`status`（上传为 0）、`parts`（单文件为 0） |
+
+改列的顺序会让旧数据和新数据对不上，只往后加。
+
+查询走 SQL API：`POST https://api.cloudflare.com/client/v4/accounts/<账户 id>/analytics_engine/sql`，表名是数据集名。wrangler 的 OAuth token 调这个接口返回 `Authorization error`，要在面板建一个只有 Account Analytics Read 权限的 API token。例如最近 7 天每天、每个方向 20 MB 以上的平均速率：
+
+```sql
+SELECT toStartOfDay(timestamp) AS day, blob1 AS dir,
+       SUM(_sample_interval) AS n,
+       SUM(_sample_interval * double4) / SUM(_sample_interval) AS avg_MBps
+FROM filebox_xfer
+WHERE timestamp > NOW() - INTERVAL '7' DAY AND double5 = 1 AND double1 > 20000000
+GROUP BY day, dir ORDER BY day
+```
+
+`_sample_interval` 是采样权重，数据量大时 Analytics Engine 会采样，平均值要按它加权。
+
+2026-11-16 查的额度：免费计划每天写 10 万个数据点、查 1 万次；付费计划每月 1000 万点、100 万次，超出按量计费。文档写明目前还不收费，没写免费计划超出额度后是报错还是丢弃。filebox 每次上传的每一段、每次下载各写一个点，一天几百个，离额度很远。
+
 ## 孤儿对账
 
 `sweepOrphans`（`src/evict.js`）在每小时的定时任务里、清理之后运行，子请求预算是 48 减去清理用掉的。它列出 release 里全部资产（REST 分页，GraphQL 的 ReleaseAsset 没有数据库 id），挑出 `fb_` 开头、索引里没有、创建超过 `ORPHAN_HOURS` 的资产删掉。不是 `fb_` 开头的资产是别人手工放的，不碰。

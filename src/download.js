@@ -90,7 +90,7 @@ export async function serveFile(request, env, cfg, ctx, user, path, url) {
   const range = request.headers.get("range");
 
   if (Array.isArray(rec.parts) && rec.parts.length > 1) {
-    return serveParts(cfg, ctx, rec, versioned, range, downLog(request, user, rec, "BYPASS"), t0);
+    return serveParts(cfg, ctx, rec, versioned, range, downLog(request, env, user, rec, "BYPASS"), t0);
   }
 
   if (cache && !range) {
@@ -99,7 +99,7 @@ export async function serveFile(request, env, cfg, ctx, user, path, url) {
       const headers = new Headers(hit.headers);
       headers.set("cache-control", cacheControl(cfg, versioned));
       headers.set("x-cache", "HIT");
-      const body = timed(ctx, hit.body, hit.headers.get("content-length"), downLog(request, user, rec, "HIT"), t0);
+      const body = timed(ctx, hit.body, hit.headers.get("content-length"), downLog(request, env, user, rec, "HIT"), t0);
       return new Response(body, { status: hit.status, headers });
     }
   }
@@ -133,13 +133,13 @@ export async function serveFile(request, env, cfg, ctx, user, path, url) {
     ctx.waitUntil(cache.put(key, stored).catch(() => {}));
   }
 
-  const log = downLog(request, user, rec, xcache, upstream.status);
+  const log = downLog(request, env, user, rec, xcache, upstream.status);
   const body = timed(ctx, upstream.body, upstream.headers.get("content-length"), log, t0);
   return new Response(body, { status: upstream.status, headers });
 }
 
-function downLog(request, user, rec, cache, status = 200) {
-  return { xfer: "down", user, path: rec.path, status, cache, colo: request.cf?.colo };
+function downLog(request, env, user, rec, cache, status = 200) {
+  return { xfer: "down", user, path: rec.path, status, cache, colo: request.cf?.colo, ds: env.XFER };
 }
 
 // 把 body 经 FixedLengthStream 接给客户端，传完或断开时记日志。原生流之间
