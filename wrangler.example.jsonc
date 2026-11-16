@@ -35,7 +35,7 @@
   ],
 
   // 可选，默认不绑定。打开后每次上传和下载写一个 Analytics Engine 数据点，用来长期
-  // 统计速率（Workers Logs 只存 3 天）。数据集在第一次写入时自动创建。Analytics Engine
+  // 统计速率（Workers Logs 只存 3 天）。账户第一次用要先在面板开通 Analytics Engine，否则部署失败。Analytics Engine
   // 有自己的额度和定价，打开前先在 Cloudflare 的定价页和面板 Billing 里确认。
   // "analytics_engine_datasets": [
   //   { "binding": "XFER", "dataset": "filebox_xfer" }
