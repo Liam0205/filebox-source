@@ -98,8 +98,10 @@ npx -y wrangler@4.161.0 dev --port 8801 --ip 127.0.0.1 --local-upstream 127.0.0.
 
 Linux 上测不到的两件事，在 Mac 上踩过：
 
-- **菜单不出现。** 系统能登记上服务（`pbs -dump` 里看得到），Finder 的右键菜单里却没有。手写的 plist 缺了 `Info.plist` 的 `NSIconName`、`document.wflow` 的 `applicationPaths` 和动作的 `arguments` 等字段，用 Automator 打开再保存一次，菜单就出来了。现在脚本生成的两个文件照着 macOS 15 的 Automator 保存出来的内容写，只有界面显示用的本地化字符串不同（`ActionName`、`Keywords`、`AMApplication`）。改这两个文件时，在 Mac 上用 Automator 存一份，用 `plistlib` 把两边展开成键路径逐项比对，除了这几个字段和 `COMMAND_STRING` 外应当没有差别。Automator 打开后顶部显示「位于 任何应用程序」而不是「访达」，就说明 `workflowMetaData` 不对。
+- **菜单不出现。** 系统能登记上服务（`pbs -dump` 里看得到），Finder 的右键菜单里却没有。macOS 15 上，手写的 plist 缺了 `Info.plist` 的 `NSIconName`、`document.wflow` 的 `applicationPaths` 和动作的 `arguments` 等字段。macOS 26.5 上同样的字段都齐了，菜单仍然不出现，`AMApplicationBuild` 还是 `528`、`processesInput` / `serviceProcessesInput` / `useAutomaticInputType` 还写成整数 `0`；在 Automator 里打开按 ⌘S 保存一次（Automator 把 `AMApplicationBuild` 升到 `534`，三项改写成布尔 `false`）菜单就出来了。两种情况都是 Automator 存一次即好。现在脚本生成的两个文件照着 macOS 26 的 Automator 保存出来的内容写，只有界面显示用的本地化字符串不同（`ActionName`、`Keywords`、`AMApplication`）。改这两个文件时，在 Mac 上用 Automator 存一份，用 `plistlib` 把两边展开成键路径逐项比对，除了这几个字段、`location` 和 `COMMAND_STRING` 外应当没有差别。Automator 打开后顶部显示「位于 任何应用程序」而不是「访达」，就说明 `workflowMetaData` 不对。
+- **`pbs` 不在 PATH 里了。** macOS 26 上 `pbs -dump` 报 `command not found`，要用 `/System/Library/CoreServices/pbs -dump`。
 - **`Operation not permitted`。** 快速操作的进程读不了「文稿」「桌面」「下载」这些受隐私保护目录里的文件，脚本放在那里（或者经软链接指到那里）时，bash 打不开脚本。所以快速操作调用的是 `~/Library/Application Support/filebox/` 下的副本，`update` 会同步它。测 `update` 时要确认副本也换成了新版。
+- **token 同样会被 TCC 挡住。** 2026-11-16 在 macOS 26.5 上，右键上传报 `sed: /Users/…/.config/filebox/token: Operation not permitted`，因为 `~/.config` 是指到「文稿」里的软链接。注意 TCC 拦的是 `open()`，`[ -r ]` 用 access(2) 并不拦，所以检查 token 文件不能只靠 `-r`，要以 sed 能不能读完为准（`read_token_file`）。现在 `login` 会同时写 `~/Library/Application Support/filebox/token`，读取时前者读不出就退到后者；`update` 和 `install-finder` 发现副本缺失时会补写。
 
 2026-11-15 在 macOS 15.7.3 上验证过：`install-finder` 之后不用另存、不用重启 Finder，菜单直接出现；脚本真身在「文稿」里时能正常运行，选中「文稿」里的文件也能上传。
 

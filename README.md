@@ -127,13 +127,13 @@ filebox version
 filebox install-finder                   # macOS：Finder 右键菜单加「上传到 filebox」；uninstall-finder 去掉
 ```
 
-token 先读环境变量 `FILEBOX_TOKEN`，没有再读 `filebox login` 存下的 `~/.config/filebox/token`（设置了 `XDG_CONFIG_HOME` 时放在它下面），目录和文件只有自己能读。`login` 从标准输入读 token，不经过命令行参数，所以不会进 shell 历史；终端里输入时不回显，也可以用 `pbpaste | filebox login` 这样从管道传进去。保存前会先调一次 `whoami`，token 不能用就不保存。`logout` 删掉这个文件。
+token 先读环境变量 `FILEBOX_TOKEN`，没有再读 `filebox login` 存下的 `~/.config/filebox/token`（设置了 `XDG_CONFIG_HOME` 时放在它下面），目录和文件只有自己能读。macOS 上 `login` 还会往 `~/Library/Application Support/filebox/token` 写一份，给 Finder 右键菜单用；读的时候前者读不出来就用后者。`login` 从标准输入读 token，不经过命令行参数，所以不会进 shell 历史；终端里输入时不回显，也可以用 `pbpaste | filebox login` 这样从管道传进去。保存前会先调一次 `whoami`，token 不能用就不保存。`logout` 删掉这个文件。
 
 ### Finder 右键上传（macOS）
 
 `filebox install-finder` 在 `~/Library/Services/` 下生成一个 Automator 快速操作。之后在 Finder 里选中一个或多个文件，右键 → 快速操作 → 上传到 filebox，文件会传到根目录，下载链接复制到剪贴板（多个文件一行一个），结果用系统通知显示。开始上传时先发一条通知，超过 95 MiB 的文件每传一段再发一条「第 k/N 段」，用来判断是不是还在传。同名文件不覆盖，会在通知里报错；选中目录也会报错，要先打包。
 
-快速操作运行时读不到 shell 里的环境变量，所以要先 `filebox login` 把 token 存进文件；安装时如果文件不存在、而 `FILEBOX_TOKEN` 可用，会自动替你存一份。快速操作调用的不是脚本本身，而是安装时复制到 `~/Library/Application Support/filebox/filebox` 的副本：脚本放在「文稿」「桌面」「下载」这类受隐私保护的目录里（或者经软链接指到那里）时，快速操作读不了它，会报 `Operation not permitted`。`filebox update` 会顺带更新这份副本，脚本挪了位置也不用重装。`uninstall-finder` 删掉快速操作和副本。
+快速操作运行时读不到 shell 里的环境变量，所以要先 `filebox login` 把 token 存进文件；安装时如果文件不存在、而 `FILEBOX_TOKEN` 可用，会自动替你存一份。快速操作调用的不是脚本本身，也不是 `~/.config` 里的 token，而是 `~/Library/Application Support/filebox/` 下的副本：脚本和 token 放在「文稿」「桌面」「下载」这类受隐私保护的目录里（或者经软链接指到那里）时，快速操作读不了，会报 `Operation not permitted`。`filebox update` 会顺带更新脚本副本，并补写还没生成过的 token 副本。`uninstall-finder` 删掉快速操作和脚本副本。
 
 `ls` 的第一行是整个账号的用量，例如 `alice：12 个文件，占用名额 20/300，长期 3/20 个`；下面先列子目录（`dir` 开头），再列文件，长期文件标着 `keep`。路径都是完整路径，可以直接拿去 `get`、`rm`。
 
