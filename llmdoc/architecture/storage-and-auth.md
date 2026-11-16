@@ -164,7 +164,7 @@ GitHub release 只当字节仓库用。下载和删除都用资产 id 走仓库�
 
 ### 长期统计
 
-Workers Logs 在免费计划下只存 3 天。绑定了 Analytics Engine 数据集（`wrangler.jsonc` 的 `analytics_engine_datasets`，绑定名 `XFER`）时，`logTransfer` 每次再写一个数据点，保留 3 个月。没绑定时只打日志。数据集在第一次写入时自动创建，面板里不用开通。写入出错只记一行 `xferStatsError`，不影响传输。
+Workers Logs 在免费计划下只存 3 天。Analytics Engine 绑定是可选的，默认不绑定：`wrangler.example.jsonc` 里 `analytics_engine_datasets` 那一段是注释掉的，线上配置打开了它（绑定名 `XFER`）。绑定了时，`logTransfer` 每次再写一个数据点，保留 3 个月；没绑定时只打日志，代码里靠 `env.XFER` 是否存在判断。数据集在第一次写入时自动创建，面板里不用开通。写入出错只记一行 `xferStatsError`，不影响传输。
 
 | 列 | 内容 |
 | - | - |
