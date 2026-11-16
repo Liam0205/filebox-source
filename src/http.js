@@ -35,6 +35,23 @@ export function notFound(cfg) {
   return text(`可用路径：${cfg.basePath}/  ·  ${cfg.basePath}/admin  ·  ${cfg.basePath}/f/<用户>/<路径>`, 404);
 }
 
+// 一次上传或下载的字节数和耗时，打一行 JSON 进 Workers Logs，面板里可以按字段筛选。
+// 耗时是整条链路的：客户端、Cloudflare、GitHub 哪一段慢都会算进来。
+// Workers 里 Date.now() 只在 I/O 之后前进，t0 和结束都紧挨着 I/O，误差可以不计。
+// 出错时不知道实际传了多少，记的是本该传的长度（size），不算速率。
+// 下载带 wait：开始送出字节之前花的时间（查索引、连 GitHub），速率按 ms - wait 算。
+export function logTransfer(fields, bytes, t0, err) {
+  const ms = Date.now() - t0;
+  if (err) {
+    const error = String(err && err.message ? err.message : err).slice(0, 200);
+    console.log(JSON.stringify({ ...fields, size: bytes, ms, error }));
+    return;
+  }
+  const span = ms - (fields.wait || 0);
+  const MBps = span > 0 ? Math.round((bytes / 1e6 / (span / 1000)) * 100) / 100 : null;
+  console.log(JSON.stringify({ ...fields, bytes, ms, MBps }));
+}
+
 // JSON 请求体上限。账号和目录接口的正文都很小，超过就拒绝，
 // 免得一个巨大的请求体把 Worker 的 128 MB 内存撑爆。
 const MAX_JSON_BYTES = 16 * 1024;

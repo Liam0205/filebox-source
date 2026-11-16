@@ -229,6 +229,7 @@ DELETE /api/keep?path=…[&format=text]    取消长期
 - 上传要求 `Content-Length`，不能用 chunked 请求体（GitHub 的资产上传接口本身也要求长度）。
 - 单文件最大 2 GiB（`MAX_FILE_BYTES`），同时不能超过 22 段。段数上限来自下载：每段要花 2 个外部子请求，免费计划每次调用最多 50 个。
 - **分段的大文件不进边缘缓存**，每次下载都从 GitHub 取：Cache API 单个对象最大 512 MB，而且整段写缓存很费子请求。拼接只是在 Worker 里转发字节，CPU 用量在线上还没有实测过。
+- **每次上传和下载都在 Workers Logs 里记一行**：`xfer`（up 或 down）、用户、路径、字节数、耗时 `ms`、速率 `MBps`、`colo`，下载还有 `cache` 和 `status`。上传的耗时和客户端看到的一致；下载的耗时只到字节交给运行时为止，运行时之后还有缓冲，小文件算出来的速率偏高。
 - 旧版命令行脚本没有 `update` 命令，也不会分段上传，要手工重新下载一次 `/filebox`。
 - 索引是 KV 上的扁平键，用户多、文件多时列目录会变慢并消耗 KV list 配额；这个设计的目标是几百到几千个文件。
 - **个人名额上限是软的**：每小时才检查一次，两次检查之间一个用户可以暂时超过 300 个。
@@ -245,7 +246,7 @@ src/
   app.js       「添加到主屏幕」的 manifest 和内嵌图标（源文件 assets/icon.svg）
   admin.js     管理页（单页应用）与账号/token 接口
   files.js     文件管理 API
-  download.js  公开下载、Range、缓存、分段拼接
+  download.js  公开下载、Range、缓存、分段拼接、下载日志
   access.js    身份解析（token / 会话）、同源校验
   auth.js      口令哈希、会话签名、token 生成
   users.js     KV：用户、token

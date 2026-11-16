@@ -9,8 +9,11 @@
 // 分段存储的大文件由 Worker 按顺序向 GitHub 取各段、接成一个流返回。
 // Range 请求换算到具体的段，只取用得到的那几段。大文件不进缓存：
 // Cache API 单个对象上限 512 MB，而且每次都整段写缓存也太费。
+//
+// 响应体一律经 FixedLengthStream 交给客户端，在 waitUntil 里 pipeTo，传完或
+// 中断时记一行日志（logTransfer），面板里能看到每次下载的字节数和耗时。
 
-import { methodNotAllowed, text } from "./http.js";
+import { logTransfer, methodNotAllowed, text } from "./http.js";
 import { basename, encodePath, isPathSegments } from "./names.js";
 import { getFile } from "./store.js";
 import { assetDownload } from "./github.js";
@@ -66,6 +69,7 @@ function baseHeaders(cfg, rec, versioned) {
 }
 
 export async function serveFile(request, env, cfg, ctx, user, path, url) {
+  const t0 = Date.now();
   if (request.method !== "GET" && request.method !== "HEAD") return methodNotAllowed();
   if (!NAME_RE.test(user) || !isPathSegments(path, cfg)) return text("路径不合法", 400);
 
@@ -86,7 +90,7 @@ export async function serveFile(request, env, cfg, ctx, user, path, url) {
   const range = request.headers.get("range");
 
   if (Array.isArray(rec.parts) && rec.parts.length > 1) {
-    return serveParts(cfg, ctx, rec, versioned, range);
+    return serveParts(cfg, ctx, rec, versioned, range, downLog(request, user, rec, "BYPASS"), t0);
   }
 
   if (cache && !range) {
@@ -95,7 +99,8 @@ export async function serveFile(request, env, cfg, ctx, user, path, url) {
       const headers = new Headers(hit.headers);
       headers.set("cache-control", cacheControl(cfg, versioned));
       headers.set("x-cache", "HIT");
-      return new Response(hit.body, { status: hit.status, headers });
+      const body = timed(ctx, hit.body, hit.headers.get("content-length"), downLog(request, user, rec, "HIT"), t0);
+      return new Response(body, { status: hit.status, headers });
     }
   }
 
@@ -115,19 +120,42 @@ export async function serveFile(request, env, cfg, ctx, user, path, url) {
     const v = upstream.headers.get(h);
     if (v) headers.set(h, v);
   }
-  headers.set("x-cache", cache ? "MISS" : "BYPASS");
+  const xcache = cache ? "MISS" : "BYPASS";
+  headers.set("x-cache", xcache);
 
-  const out = new Response(upstream.body, { status: upstream.status, headers });
-
+  // 写缓存的那一份从上游分出去，不从给客户端的流分：计时要跟着客户端走，
+  // 不能被写缓存的速度带偏。
   if (cache && !range && upstream.status === 200) {
-    const stored = new Response(out.clone().body, {
+    const stored = new Response(upstream.clone().body, {
       status: 200,
       headers: { ...baseHeaders(cfg, rec, true) },
     });
     ctx.waitUntil(cache.put(key, stored).catch(() => {}));
   }
 
-  return out;
+  const log = downLog(request, user, rec, xcache, upstream.status);
+  const body = timed(ctx, upstream.body, upstream.headers.get("content-length"), log, t0);
+  return new Response(body, { status: upstream.status, headers });
+}
+
+function downLog(request, user, rec, cache, status = 200) {
+  return { xfer: "down", user, path: rec.path, status, cache, colo: request.cf?.colo };
+}
+
+// 把 body 经 FixedLengthStream 接给客户端，传完或断开时记日志。原生流之间
+// pipeTo 不经过 JS，不额外花 CPU（见 serveParts 的注释）。长度不明时原样透传，不计时。
+function timed(ctx, body, length, log, t0) {
+  const n = Number(length);
+  if (!body || !Number.isSafeInteger(n) || n <= 0) return body;
+  log = { ...log, wait: Date.now() - t0 };
+  const { readable, writable } = new FixedLengthStream(n);
+  ctx.waitUntil(
+    body.pipeTo(writable).then(
+      () => logTransfer(log, n, t0),
+      (err) => logTransfer(log, n, t0, err),
+    ),
+  );
+  return readable;
 }
 
 // 解析单个区间 bytes=a-b / bytes=a- / bytes=-n。多区间和不合法的写法返回 null，
@@ -165,7 +193,7 @@ export function partSlices(sizes, start, end) {
   return out;
 }
 
-async function serveParts(cfg, ctx, rec, versioned, rangeHeader) {
+async function serveParts(cfg, ctx, rec, versioned, rangeHeader, log, t0) {
   const sizes = rec.parts.map((p) => p.s);
   const size = rec.size;
   const r = rangeHeader ? parseRange(rangeHeader, size) : null;
@@ -199,7 +227,9 @@ async function serveParts(cfg, ctx, rec, versioned, rangeHeader) {
   // 要过一遍 JS，线上实测约 14 ms CPU/MB，一百多 MB 就会因超出 CPU 限制被掐断。
   // FixedLengthStream 是运行时原生的流，原生流之间 pipeTo 不经过 JS；它还让
   // 响应带上 Content-Length，流不足长时连接会报错，客户端不会把半个文件当成完整的。
-  const { readable, writable } = new FixedLengthStream(end - start + 1);
+  const length = end - start + 1;
+  const { readable, writable } = new FixedLengthStream(length);
+  log = { ...log, status: r ? 206 : 200, parts: slices.length, wait: Date.now() - t0 };
   const pump = async () => {
     try {
       for (let k = 0; k < slices.length; k += 1) {
@@ -207,8 +237,9 @@ async function serveParts(cfg, ctx, rec, versioned, rangeHeader) {
         await res.body.pipeTo(writable, { preventClose: true });
       }
       await writable.close();
+      logTransfer(log, length, t0);
     } catch (err) {
-      console.log(JSON.stringify({ partsError: err.message, path: rec.path }));
+      logTransfer(log, length, t0, err);
       await writable.abort(err).catch(() => {});
     }
   };
@@ -216,7 +247,7 @@ async function serveParts(cfg, ctx, rec, versioned, rangeHeader) {
   ctx.waitUntil(pump());
 
   const headers = new Headers(baseHeaders(cfg, rec, versioned));
-  headers.set("content-length", String(end - start + 1));
+  headers.set("content-length", String(length));
   headers.set("x-cache", "BYPASS");
   if (r) headers.set("content-range", `bytes ${start}-${end}/${size}`);
   return new Response(readable, { status: r ? 206 : 200, headers });

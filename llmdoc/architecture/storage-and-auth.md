@@ -127,6 +127,32 @@ GitHub release 只当字节仓库用。下载和删除都用资产 id 走仓库�
 - 接流必须用 `FixedLengthStream` 这种运行时原生的流。`TransformStream` 是 JS 实现，每个数据块都要经过 JS。2026-11-15 线上实测，用 `TransformStream` 下载一个 200 MiB、3 段的文件，CPU 用到约 2 秒，传到 75–145 MB 时请求以 `exceededCpu` 结束；换成 `FixedLengthStream` 后，同一个文件完整下载只用了 8 ms CPU。`FixedLengthStream` 还让响应带上 `Content-Length`。用 `TransformStream` 时响应里没有这个头，流中途断掉，curl 也照样返回 0。
 - 接近 2 GiB 的文件在线上的 CPU 用量还没测过（见 `memory/doc-gaps.md`）。
 
+## 传输日志
+
+每次上传和下载结束时，`logTransfer`（`src/http.js`）打一行 JSON 进 Workers Logs：
+
+```json
+{"xfer":"down","user":"…","path":"…","status":200,"cache":"MISS","colo":"NRT","wait":280,"bytes":700000,"ms":627,"MBps":2.02}
+```
+
+- 上传在 `putAsset` 里计时。GitHub 收完请求体才返回，所以耗时覆盖整个上传；分段上传每段一行，`path` 带 `(n/of)`。
+- 下载的响应体都经 `FixedLengthStream` 交出去，`pipeTo` 放在 `waitUntil` 里，结束时记日志。单文件和缓存命中走 `timed`，分段文件在 `serveParts` 的 `pump` 里记，多一个 `parts` 字段。上游没给长度时不包流，也不记。
+- 下载的 `wait` 是开始送出字节之前花的时间（查索引、连 GitHub、取第一段），`MBps` 按 `ms - wait` 算。上传没有这一项，GitHub 只在收完请求体后才回应，分不出来。
+- 出错或客户端断开时记 `error`，`size` 是本该传的长度，不算速率。
+- 缓存未命中时，写缓存的那一份从 `upstream.clone()` 分出，不从给客户端的流分。
+- HEAD、404、416 不记。
+
+这个数字要这样读：
+
+- 耗时是整条链路的。下载是 GitHub → Cloudflare → 客户端，上传反过来，分不出慢在哪一段。缓存命中的下载不经过 GitHub，可以拿来对照。
+- 上传的耗时和客户端看到的一致。本地用 `curl --limit-rate 500k` 传 4 MB，客户端 7.77 秒，日志 7.75 秒。
+- 下载的耗时只到字节交给运行时为止，之后还有缓冲。本地用 `curl --limit-rate` 实测：
+  - 单文件（一次 pipeTo）：4 MB 和 12 MB 的文件按 500 KB/s 下载，客户端用了 8.1 秒和 23.8 秒，日志只记了 0.37 秒和 0.47 秒，整个文件都进了缓冲。
+  - 分段文件（段长 1 MiB）：3.5 MB 按 500 KB/s，客户端 7 秒、日志 1.2 秒；20 MB 按 2 MB/s，两边都是 13.7 秒。缓冲大约几 MB。
+  - 给 `FixedLengthStream` 传 `highWaterMark`（0 或 64 KiB），单文件的结果不变，缓冲不在 JS 流这一层。
+  - 这些是 wrangler dev 下的结果，线上的缓冲有多大没测过。缓冲装得下的文件，日志里的速率反映的是 GitHub 到 Worker 的速度；客户端在缓冲送完之前断开，也会记成成功。
+- 缓存命中的小文件耗时只有几毫秒，算出来是几百 MB/s，没有意义。
+
 ## 孤儿对账
 
 `sweepOrphans`（`src/evict.js`）在每小时的定时任务里、清理之后运行，子请求预算是 48 减去清理用掉的。它列出 release 里全部资产（REST 分页，GraphQL 的 ReleaseAsset 没有数据库 id），挑出 `fb_` 开头、索引里没有、创建超过 `ORPHAN_HOURS` 的资产删掉。不是 `fb_` 开头的资产是别人手工放的，不碰。

@@ -16,7 +16,7 @@
 
 ## architecture/
 
-- `llmdoc/architecture/storage-and-auth.md`：GitHub release 存字节 + KV 存索引的分层；为什么资产名必须是不透明 id（GitHub 会改写斜杠、中文、空格）；KV 键空间与文件键的 metadata；自动清理的实现要点；重命名与移动为什么只改索引、键的写入顺序；分段上传的签名回执、分段下载的拼接、孤儿对账；身份模型（会话 cookie / API token / 账号版本号 `ver`）；目录是显式记录 + 由文件路径推出的隐式目录。
+- `llmdoc/architecture/storage-and-auth.md`：GitHub release 存字节 + KV 存索引的分层；为什么资产名必须是不透明 id（GitHub 会改写斜杠、中文、空格）；KV 键空间与文件键的 metadata；自动清理的实现要点；重命名与移动为什么只改索引、键的写入顺序；分段上传的签名回执、分段下载的拼接、孤儿对账；上传下载的传输日志（字节数、耗时、速率）和怎么读；身份模型（会话 cookie / API token / 账号版本号 `ver`）；目录是显式记录 + 由文件路径推出的隐式目录。
 
 ## reference/
 

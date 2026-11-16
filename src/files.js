@@ -18,7 +18,7 @@
 // whoami、files、url、upload 系列、keep、move 接受 ?format=text，返回纯文本，给命令行用：
 // 客户端要能在 macOS 自带的 Bash 3.2 上跑，不能指望有 JSON 解析工具。
 
-import { json, methodNotAllowed, readJson, readText, text } from "./http.js";
+import { json, logTransfer, methodNotAllowed, readJson, readText, text } from "./http.js";
 import {
   basename,
   encodePath,
@@ -234,6 +234,9 @@ function bodyLength(request) {
 // 把请求体传成一个资产。422 时先清理一批再返回 507，让客户端重传。
 // 成功返回 { asset }，失败返回 { response }。
 async function putAsset(env, cfg, request, user, label, contentType, length) {
+  // GitHub 收完整个请求体才返回，所以这段耗时就是这一次（或这一段）的上传时间。
+  const t0 = Date.now();
+  const log = { xfer: "up", user, path: label, colo: request.cf?.colo };
   try {
     const asset = await uploadAsset(cfg, {
       name: `fb_${user}_${randomHex(12)}`,
@@ -242,8 +245,10 @@ async function putAsset(env, cfg, request, user, label, contentType, length) {
       contentType,
       contentLength: length,
     });
+    logTransfer(log, asset.size, t0);
     return { asset };
   } catch (err) {
+    logTransfer(log, length, t0, err);
     // 422 多半是 release 的资产数到了 1000（GitHub 没有文档说明满了返回什么）。
     // 请求体已经读掉了，没法在这里重试；先清理一批，让客户端重新上传。
     if (err.status === 422) {
