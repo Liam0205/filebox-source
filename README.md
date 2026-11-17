@@ -206,6 +206,22 @@ DELETE /api/keep?path=…[&format=text]    取消长期
 
 「添加到主屏幕」用的 manifest 和图标：`GET /manifest.webmanifest`、`GET /icons/180.png|192.png|512.png`，不需要登录。
 
+## 用 Grafana 看传输统计
+
+打开 Analytics Engine 绑定之后（`wrangler.example.jsonc` 里注释掉的 `analytics_engine_datasets` 那一段），每次上传和下载会写一个数据点。`grafana/dashboard.json` 是配套的 Grafana 面板：传输次数和字节、各用户的用量、每 15 分钟的平均速度、各方向和各节点的速度分位数、下载最多的文件、最近 100 条传输。自己搭的 Grafana 和 Grafana Cloud 的免费档都能用。
+
+1. 在 Cloudflare 面板建一个 API token，权限只给 Account → Account Analytics → Read。
+2. Grafana 里 Connections → Add new connection，搜 `altinity`，点 *Altinity plugin for ClickHouse* → Install。
+3. 新建这个类型的数据源：URL 填 `https://api.cloudflare.com/client/v4/accounts/<账户 id>/analytics_engine/sql`，认证开关全部关掉，加一个 Custom HTTP Header：`Authorization` = `Bearer <令牌>`，打开 *Use POST method to send queries*。
+4. Dashboards → New → Import，上传 `grafana/dashboard.json`，数据源选上一步建的那个。
+
+面板查的数据集名是 `filebox_xfer`。用了别的名字，就改 `grafana/build.py` 里的 `TABLE` 再跑一遍，它会重新生成 `dashboard.json`。改面板也是改这个脚本，改完重新导入，提示已存在时选 Import (Overwrite)。
+
+- 面板开着的时候每次刷新发 9 次查询，默认 30 分钟刷新一次，开一整天约 430 次。Analytics Engine 的查询额度按整个账户算，免费计划每天 1 万次，所以刷新间隔只留了 15 分钟、30 分钟、1 小时三档。不要在这个数据源上建告警规则，告警不开页面也在后台定时查询。
+- 速度的三个面板只算传完的、不小于 20 MB 的传输，阈值在面板顶上的输入框里改。下载的耗时到字节交给 Cloudflare 运行时为止，小文件算出来的速度偏高。
+- 次数按请求算：分段上传每段一次，播放器和多线程下载器发的每个 Range 请求各算一次。
+- 不要把别人邀请进 Grafana 当 Viewer：Viewer 能对数据源发任意查询，看得到所有用户的文件路径。这份面板也不能用 Grafana 的对外分享链接，Altinity 的插件在分享页上不发查询，页面全是 No data。
+
 ## 安全设计
 
 - 口令用 PBKDF2-SHA256，迭代次数可配（`PASSWORD_ITERATIONS`，默认 100000），盐随机 16 字节。2026-11-14 在线上实测，登录耗时约 0.8–0.9 秒，没有触发免费计划的 CPU 限制。
@@ -229,7 +245,7 @@ DELETE /api/keep?path=…[&format=text]    取消长期
 - 上传要求 `Content-Length`，不能用 chunked 请求体（GitHub 的资产上传接口本身也要求长度）。
 - 单文件最大 2 GiB（`MAX_FILE_BYTES`），同时不能超过 22 段。段数上限来自下载：每段要花 2 个外部子请求，免费计划每次调用最多 50 个。
 - **分段的大文件不进边缘缓存**，每次下载都从 GitHub 取：Cache API 单个对象最大 512 MB，而且整段写缓存很费子请求。拼接只是在 Worker 里转发字节，CPU 用量在线上还没有实测过。
-- **每次上传和下载都在 Workers Logs 里记一行**：`xfer`（up 或 down）、用户、路径、字节数、耗时 `ms`、速率 `MBps`、`colo`，下载还有 `cache` 和 `status`。上传的耗时和客户端看到的一致；下载的耗时只到字节交给运行时为止，运行时之后还有缓冲，小文件算出来的速率偏高。默认只写日志。在 `wrangler.jsonc` 里打开 Analytics Engine 绑定 `XFER`（`wrangler.example.jsonc` 里注释掉的那一段）后，每次传输还会写一个数据点，保留 3 个月，可以用 SQL 按天、按用户统计；打开前先确认 Analytics Engine 的计费。
+- **每次上传和下载都在 Workers Logs 里记一行**：`xfer`（up 或 down）、用户、路径、字节数、耗时 `ms`、速率 `MBps`、`colo`，下载还有 `cache` 和 `status`。上传的耗时和客户端看到的一致；下载的耗时只到字节交给运行时为止，运行时之后还有缓冲，小文件算出来的速率偏高。默认只写日志。在 `wrangler.jsonc` 里打开 Analytics Engine 绑定 `XFER`（`wrangler.example.jsonc` 里注释掉的那一段）后，每次传输还会写一个数据点，保留 3 个月，可以用 SQL 按天、按用户统计，也可以接 Grafana（见「用 Grafana 看传输统计」）；打开前先确认 Analytics Engine 的计费。
 - 旧版命令行脚本没有 `update` 命令，也不会分段上传，要手工重新下载一次 `/filebox`。
 - 索引是 KV 上的扁平键，用户多、文件多时列目录会变慢并消耗 KV list 配额；这个设计的目标是几百到几千个文件。
 - **个人名额上限是软的**：每小时才检查一次，两次检查之间一个用户可以暂时超过 300 个。
@@ -259,6 +275,9 @@ src/
 scripts/
   setup.mjs    引导管理员账号
   filebox      命令行客户端（Bash 3.2 兼容，Worker 在 /filebox 下发）
+grafana/
+  build.py        生成 dashboard.json；--check 比对，--test 把每条查询到 SQL API 上跑一遍
+  dashboard.json  Grafana 面板：传输次数、字节、速度（生成的，不要手改）
 test/
   evict.test.mjs  挑选待删文件、找孤儿、Range 换算到段、配置默认值的单元测试（node test/evict.test.mjs）
 ```

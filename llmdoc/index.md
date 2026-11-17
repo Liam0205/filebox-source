@@ -21,6 +21,7 @@
 ## reference/
 
 - `llmdoc/reference/platform-limits.md`：Workers 免费版、KV 免费额度、GitHub release 的硬上限，以及每条上限在本项目里先撞到哪里；超额行为（报错而非计费）。
+- `llmdoc/reference/grafana-dashboard.md`：`grafana/dashboard.json` 的数据源设置、九条查询各看什么、Analytics Engine 的 SQL 和 Altinity 插件对查询写法的限制、每次刷新花多少查询额度、为什么不能建告警、不能邀请 Viewer、不能对外分享；怎样改面板、怎样在本机起一个 Grafana 检查；还没确认的事。
 
 ## guides/
 
@@ -38,4 +39,5 @@
 - 要改自动清理或长期文件 → 先读 `architecture/storage-and-auth.md` 的「自动清理」一节和 `must/invariants.md` 第 14 条，改完按 `guides/deploy-and-test.md` 的「测自动清理」测。
 - 要改 `scripts/filebox` → 先读 `overview/project-overview.md` 里的兼容性约束，改完按 `guides/deploy-and-test.md` 的「测命令行脚本的兼容性」用 Bash 3.2 测。
 - 要改分段上传、分段下载或孤儿对账 → 先读 `architecture/storage-and-auth.md` 的「分段上传与回执」「分段下载」「孤儿对账」三节和 `must/invariants.md` 第 15、16、17 条，改完按 `guides/deploy-and-test.md` 的「测分段上传和孤儿对账」测。
+- 要改 Grafana 面板或者加查询 → 先读 `reference/grafana-dashboard.md`，改 `grafana/build.py`，不要手改 `dashboard.json`。
 - 「为什么不直接用资产名做路径」→ `architecture/storage-and-auth.md`。
